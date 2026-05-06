@@ -6,7 +6,7 @@ workers_dev = true
 [[d1_databases]]
 binding = "DB"
 database_name = "private-mailbox-pool"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "4d93c5ca-4fa0-4f68-91c7-6046a132a870"
 migrations_dir = "migrations"
 
 [[r2_buckets]]

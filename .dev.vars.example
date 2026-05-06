@@ -1,0 +1,13 @@
+APP_NAME=Private Mailbox Pool
+BASE_DOMAIN=example.com
+COOKIE_NAME=pmp_session
+SESSION_TTL_HOURS=24
+MAX_LOGIN_FAILURES=10
+LOGIN_BLOCK_MINUTES=15
+CF_ACCESS_ENABLED=false
+BOOTSTRAP_ADMIN_USERNAME=admin
+# Choose one bootstrap password mode:
+# 1) Plain password for dashboard-first setup:
+BOOTSTRAP_ADMIN_PASSWORD_PLAIN=change-this-in-dev
+# 2) Or a precomputed hash:
+# BOOTSTRAP_ADMIN_PASSWORD_HASH=pbkdf2_sha256$210000$REPLACE_BASE64_SALT$REPLACE_BASE64_HASH

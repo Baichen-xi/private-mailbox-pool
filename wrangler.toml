@@ -1,0 +1,27 @@
+name = "private-mailbox-pool"
+main = "src/worker/index.ts"
+compatibility_date = "2026-05-06"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "private-mailbox-pool"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "MAIL_BUCKET"
+bucket_name = "private-mailbox-pool-mail"
+
+[[send_email]]
+name = "EMAIL"
+
+[vars]
+APP_NAME = "Private Mailbox Pool"
+BASE_DOMAIN = "example.com"
+COOKIE_NAME = "pmp_session"
+SESSION_TTL_HOURS = "24"
+MAX_LOGIN_FAILURES = "10"
+LOGIN_BLOCK_MINUTES = "15"
+CF_ACCESS_ENABLED = "false"
+BOOTSTRAP_ADMIN_USERNAME = "admin"

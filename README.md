@@ -58,6 +58,8 @@ npm run hash:password -- "your-strong-password"
 
 Then put the generated hash into `BOOTSTRAP_ADMIN_PASSWORD_HASH` in `.dev.vars`.
 
+Cloudflare Workers currently rejects PBKDF2 iteration counts above `100000`, so this project generates compatible hashes at that limit.
+
 5. For local development, apply the migration to the local D1 database:
 
 ```bash

@@ -5,7 +5,8 @@ interface ParsedPasswordHash {
   expected: Uint8Array;
 }
 
-const PASSWORD_HASH_ITERATIONS = 210000;
+// Cloudflare Workers currently rejects PBKDF2 iteration counts above 100000.
+const PASSWORD_HASH_ITERATIONS = 100000;
 const PASSWORD_HASH_BYTES = 32;
 
 function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {

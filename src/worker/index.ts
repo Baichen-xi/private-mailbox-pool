@@ -19,6 +19,7 @@ import {
 } from "./db/attachments";
 import { writeAuditLog } from "./db/audit-logs";
 import { getDashboardStats, getRecentFailedLoginAlert } from "./db/dashboard";
+import { getDatabaseHealth } from "./db/health";
 import {
   createEmailRecord,
   findEmailByMailboxAndMessageId,
@@ -253,6 +254,15 @@ const translations = {
     adminRecentAuditLogsEmpty: "No audit activity recorded yet.",
     suspiciousLoginIps: "Suspicious IPs",
     suspiciousLoginIpsEmpty: "No suspicious IPs currently need attention.",
+    systemHealth: "System health",
+    systemHealthBody: "Check deployment safety and database migration status before production use.",
+    systemHealthOk: "Ready",
+    systemHealthNeedsAction: "Needs action",
+    healthSchemaOk: "D1 schema is ready for multiple mailboxes under the same subdomain.",
+    healthLegacySubdomainIndex:
+      "D1 still has the old unique subdomain index. Apply migration 0003 before creating multiple mailboxes under one subdomain.",
+    healthPlainPasswordWarning:
+      "Plain bootstrap password is set in this deployment. Move it to a Cloudflare Secret or use BOOTSTRAP_ADMIN_PASSWORD_HASH for production.",
     adminCount: "Admins",
     activeSessions: "Active sessions",
     failedLogins24h: "Failed logins (24h)",
@@ -357,6 +367,9 @@ const translations = {
     invalidInput: "Username and password are required.",
     invalidLocalPart:
       "Local part must be 1-32 characters and use lowercase letters, numbers, dots, underscores, or hyphens.",
+    mailboxAlreadyExists: "This mailbox address already exists. Use another local part or another subdomain.",
+    mailboxSchemaOutdated:
+      "The remote D1 database still has an old migration state, so this subdomain can only create one mailbox. Apply migration 0003 and try again.",
     unauthorized: "Sign in required.",
     routeNotFound: "Route not found.",
     recentFailedLogins: "{count} failed login attempts from {ip} in the last hour.",
@@ -553,6 +566,14 @@ const translations = {
     adminRecentAuditLogsEmpty: "暂时还没有审计记录。",
     suspiciousLoginIps: "异常登录 IP",
     suspiciousLoginIpsEmpty: "当前没有需要处理的异常 IP。",
+    systemHealth: "系统健康状态",
+    systemHealthBody: "上线前在这里检查部署安全项和数据库迁移状态。",
+    systemHealthOk: "状态正常",
+    systemHealthNeedsAction: "需要处理",
+    healthSchemaOk: "D1 结构已支持同一个子域名下创建多个邮箱。",
+    healthLegacySubdomainIndex: "D1 中仍存在旧的子域名唯一索引。请先应用 0003 迁移，再在同一子域名下创建多个邮箱。",
+    healthPlainPasswordWarning:
+      "当前部署仍设置了明文初始密码。生产环境建议改用 Cloudflare Secret 或 BOOTSTRAP_ADMIN_PASSWORD_HASH。",
     adminCount: "管理员数量",
     activeSessions: "活跃会话",
     failedLogins24h: "24 小时失败登录",
@@ -656,6 +677,8 @@ const translations = {
     loginBlocked: "失败次数过多，请在 {minutes} 分钟后再试。",
     invalidInput: "用户名和密码不能为空。",
     invalidLocalPart: "邮箱前缀长度需在 1-32 之间，并且只能使用小写字母、数字、点、下划线或短横线。",
+    mailboxAlreadyExists: "这个邮箱地址已经存在，请换一个邮箱前缀或子域名。",
+    mailboxSchemaOutdated: "远程 D1 仍停留在旧迁移状态，导致一个子域名只能创建一个邮箱。请先应用 0003 迁移后再试。",
     unauthorized: "需要先登录。",
     routeNotFound: "未找到对应路由。",
     recentFailedLogins: "过去一小时内，来自 {ip} 的登录失败次数达到 {count} 次。",
@@ -696,6 +719,39 @@ function getClientIp(request: Request): string {
 
 function isSecureRequest(request: Request): boolean {
   return new URL(request.url).protocol === "https:";
+}
+
+function isLocalRequest(request: Request): boolean {
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+}
+
+function hasPlainBootstrapPassword(env: Env): boolean {
+  return Boolean(env.BOOTSTRAP_ADMIN_PASSWORD_PLAIN?.trim());
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isLegacySubdomainUniqueIndexError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("idx_mailboxes_unique_subdomain") ||
+    normalized.includes("unique constraint failed: mailboxes.subdomain_id")
+  );
+}
+
+function isMailboxAddressConflictError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes("unique constraint failed: mailboxes.full_address") ||
+    normalized.includes("unique constraint failed: mailboxes.local_part, mailboxes.subdomain_id")
+  );
 }
 
 function resolveLocale(request: Request): Locale {
@@ -1975,6 +2031,11 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
             <div class="metric"><strong>-</strong><span>${t(locale, "failedLogins24h")}</span></div>
             <div class="metric"><strong>-</strong><span>${t(locale, "auditEvents24h")}</span></div>
           </div>
+          <div id="admin-health" class="state-panel state-panel--compact">
+            <p class="state-panel__eyebrow">${t(locale, "systemHealth")}</p>
+            <p class="state-panel__title">${t(locale, "systemHealthOk")}</p>
+            <p class="state-panel__body">${t(locale, "systemHealthBody")}</p>
+          </div>
 
           <div class="card-grid">
             <div class="card">
@@ -2161,6 +2222,12 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         revokeCurrentSessionConfirm: ${JSON.stringify(t(locale, "revokeCurrentSessionConfirm"))},
         clearIpAttemptsConfirm: ${JSON.stringify(t(locale, "clearIpAttemptsConfirm", { ip: "{ip}" }))},
         suspiciousLoginIpsEmpty: ${JSON.stringify(t(locale, "suspiciousLoginIpsEmpty"))},
+        systemHealth: ${JSON.stringify(t(locale, "systemHealth"))},
+        systemHealthOk: ${JSON.stringify(t(locale, "systemHealthOk"))},
+        systemHealthNeedsAction: ${JSON.stringify(t(locale, "systemHealthNeedsAction"))},
+        healthSchemaOk: ${JSON.stringify(t(locale, "healthSchemaOk"))},
+        healthLegacySubdomainIndex: ${JSON.stringify(t(locale, "healthLegacySubdomainIndex"))},
+        healthPlainPasswordWarning: ${JSON.stringify(t(locale, "healthPlainPasswordWarning"))},
         confirmDialogDeleteTitle: ${JSON.stringify(t(locale, "confirmDialogDeleteTitle"))},
         confirmDialogCleanupTitle: ${JSON.stringify(t(locale, "confirmDialogCleanupTitle"))},
         confirmDialogCancel: ${JSON.stringify(t(locale, "confirmDialogCancel"))},
@@ -2181,6 +2248,7 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
       const confirmDialogCancel = document.getElementById("confirm-dialog-cancel");
       const confirmDialogConfirm = document.getElementById("confirm-dialog-confirm");
       const metricsEl = document.getElementById("admin-metrics");
+      const healthEl = document.getElementById("admin-health");
       const rosterEl = document.getElementById("admin-roster");
       const policyEl = document.getElementById("admin-policy");
       const passwordForm = document.getElementById("password-form");
@@ -2234,6 +2302,26 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
           '<strong class="detail-value">' + escapeHtml(value) + '</strong>' +
           (meta ? '<span class="table-preview">' + escapeHtml(meta) + '</span>' : "") +
         '</div>';
+      }
+
+      function renderSystemHealth(health) {
+        const messages = [];
+        const needsAction = Boolean(health?.database?.legacySubdomainUniqueIndexExists) || Boolean(health?.plainBootstrapPasswordExposed);
+
+        messages.push(
+          health?.database?.legacySubdomainUniqueIndexExists
+            ? text.healthLegacySubdomainIndex
+            : text.healthSchemaOk
+        );
+        if (health?.plainBootstrapPasswordExposed) {
+          messages.push(text.healthPlainPasswordWarning);
+        }
+
+        healthEl.className = "state-panel state-panel--compact" + (needsAction ? " state-panel--danger" : "");
+        healthEl.innerHTML =
+          '<p class="state-panel__eyebrow">' + escapeHtml(text.systemHealth) + '</p>' +
+          '<p class="state-panel__title">' + escapeHtml(needsAction ? text.systemHealthNeedsAction : text.systemHealthOk) + '</p>' +
+          '<p class="state-panel__body">' + escapeHtml(messages.join(" ")) + '</p>';
       }
 
       function resolveConfirmDialog(result) {
@@ -2477,6 +2565,7 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         ].map(([label, value]) => (
           '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
         )).join("");
+        renderSystemHealth(payload.health);
 
         rosterEl.innerHTML = (payload.admins || []).map((admin) => (
           renderDetailItem(
@@ -5215,13 +5304,14 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
     return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
   }
 
-  const [stats, admins, recentSessions, recentLoginAttempts, recentAuditLogs, suspiciousLoginIps] = await Promise.all([
+  const [stats, admins, recentSessions, recentLoginAttempts, recentAuditLogs, suspiciousLoginIps, databaseHealth] = await Promise.all([
     getAdminPanelStats(env.DB),
     listAdminSummaries(env.DB, 12),
     listRecentSessions(env.DB, 8),
     listRecentLoginAttempts(env.DB, 10),
     listRecentAuditLogs(env.DB, 10),
-    listSuspiciousLoginIps(env.DB, 24, 3, 12)
+    listSuspiciousLoginIps(env.DB, 24, 3, 12),
+    getDatabaseHealth(env.DB)
   ]);
 
   return json({
@@ -5233,6 +5323,10 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
       sessionTtlHours: getNumberVar(env.SESSION_TTL_HOURS, 24),
       maxLoginFailures: getNumberVar(env.MAX_LOGIN_FAILURES, 10),
       loginBlockMinutes: getNumberVar(env.LOGIN_BLOCK_MINUTES, 15)
+    },
+    health: {
+      database: databaseHealth,
+      plainBootstrapPasswordExposed: hasPlainBootstrapPassword(env) && !isLocalRequest(request)
     },
     admins: admins.map((item) => ({
       id: item.id,
@@ -6079,6 +6173,15 @@ async function handleCreateMailbox(request: Request, env: Env): Promise<Response
       { status: 201 }
     );
   } catch (error) {
+    const message = getErrorMessage(error);
+    if (isLegacySubdomainUniqueIndexError(message)) {
+      return errorResponse(409, "MAILBOX_SCHEMA_OUTDATED", t(locale, "mailboxSchemaOutdated"));
+    }
+    if (isMailboxAddressConflictError(message)) {
+      return errorResponse(409, "MAILBOX_ALREADY_EXISTS", t(locale, "mailboxAlreadyExists"));
+    }
+
+    console.error("Mailbox creation failed", { message });
     return errorResponse(409, "MAILBOX_CONFLICT", t(locale, "unexpectedError"));
   }
 }

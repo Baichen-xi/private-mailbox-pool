@@ -4,4 +4,6 @@ node_modules/
 .env
 .wrangler-dev.log
 .wrangler-dev.err.log
+.wrangler-dev-*.log
+.wrangler-dev-*.err.log
 npm-debug.log*

@@ -100,3 +100,20 @@ export async function getAttachmentById(
     .bind(emailId, attachmentId)
     .first<AttachmentRecord>();
 }
+
+export async function listAttachmentKeysForMailbox(
+  db: D1Database,
+  mailboxId: string
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT attachments.r2_key
+       FROM attachments
+       INNER JOIN emails ON emails.id = attachments.email_id
+       WHERE emails.mailbox_id = ?`
+    )
+    .bind(mailboxId)
+    .all<{ r2_key: string }>();
+
+  return Array.from(new Set((result.results ?? []).map((item) => item.r2_key).filter(Boolean)));
+}

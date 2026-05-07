@@ -8,6 +8,18 @@ export interface SessionRecord {
   revoked_at: string | null;
 }
 
+export async function getSessionById(db: D1Database, sessionId: string): Promise<SessionRecord | null> {
+  return db
+    .prepare(
+      `SELECT id, admin_id, session_token_hash, expires_at, revoked_at
+       FROM sessions
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .bind(sessionId)
+    .first<SessionRecord>();
+}
+
 export async function createSessionRecord(
   db: D1Database,
   args: {
@@ -71,4 +83,39 @@ export async function revokeSessionByTokenHash(db: D1Database, tokenHash: string
     )
     .bind(tokenHash)
     .run();
+}
+
+export async function revokeSessionById(db: D1Database, sessionId: string): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE sessions
+       SET revoked_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?
+         AND revoked_at IS NULL`
+    )
+    .bind(sessionId)
+    .run();
+
+  return result.meta?.changes ?? 0;
+}
+
+export async function revokeOtherSessionsForAdmin(
+  db: D1Database,
+  adminId: string,
+  keepTokenHash: string
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `UPDATE sessions
+       SET revoked_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE admin_id = ?
+         AND revoked_at IS NULL
+         AND session_token_hash != ?`
+    )
+    .bind(adminId, keepTokenHash)
+    .run();
+
+  return result.meta?.changes ?? 0;
 }

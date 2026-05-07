@@ -25,3 +25,6 @@ MAX_LOGIN_FAILURES = "10"
 LOGIN_BLOCK_MINUTES = "15"
 CF_ACCESS_ENABLED = "false"
 BOOTSTRAP_ADMIN_USERNAME = "admin"
+BOOTSTRAP_ADMIN_PASSWORD_PLAIN = ""
+# Optional: precomputed password hash, used when plain password is left empty.
+BOOTSTRAP_ADMIN_PASSWORD_HASH = ""

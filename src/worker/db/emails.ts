@@ -221,6 +221,42 @@ export async function softDeleteEmails(
   return result.meta?.changes ?? 0;
 }
 
+export async function listEmailStorageKeysForMailbox(
+  db: D1Database,
+  mailboxId: string
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT
+         text_body_r2_key,
+         html_body_r2_key,
+         raw_r2_key
+       FROM emails
+       WHERE mailbox_id = ?`
+    )
+    .bind(mailboxId)
+    .all<{
+      text_body_r2_key: string | null;
+      html_body_r2_key: string | null;
+      raw_r2_key: string;
+    }>();
+
+  const keys = new Set<string>();
+  for (const item of result.results ?? []) {
+    if (item.text_body_r2_key) {
+      keys.add(item.text_body_r2_key);
+    }
+    if (item.html_body_r2_key) {
+      keys.add(item.html_body_r2_key);
+    }
+    if (item.raw_r2_key) {
+      keys.add(item.raw_r2_key);
+    }
+  }
+
+  return Array.from(keys);
+}
+
 export async function createEmailRecord(
   db: D1Database,
   args: EmailInsertArgs

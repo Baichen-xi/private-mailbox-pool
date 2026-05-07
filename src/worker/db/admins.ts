@@ -8,6 +8,18 @@ export interface AdminRecord {
   is_active: number;
 }
 
+export async function getAdminById(db: D1Database, adminId: string): Promise<AdminRecord | null> {
+  return db
+    .prepare(
+      `SELECT id, username, password_hash, password_algo, is_active
+       FROM admins
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .bind(adminId)
+    .first<AdminRecord>();
+}
+
 export async function getAdminByUsername(db: D1Database, username: string): Promise<AdminRecord | null> {
   return db
     .prepare(
@@ -56,5 +68,22 @@ export async function markAdminLogin(
        WHERE id = ?`
     )
     .bind(ipAddress, adminId)
+    .run();
+}
+
+export async function updateAdminPasswordHash(
+  db: D1Database,
+  adminId: string,
+  passwordHash: string
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE admins
+       SET password_hash = ?,
+           password_algo = 'pbkdf2_sha256',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    )
+    .bind(passwordHash, adminId)
     .run();
 }

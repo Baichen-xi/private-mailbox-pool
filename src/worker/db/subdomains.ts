@@ -174,6 +174,18 @@ export async function deleteUnusedSubdomains(db: D1Database): Promise<number> {
   return result.meta?.changes ?? 0;
 }
 
+export async function deleteSubdomainById(db: D1Database, subdomainId: string): Promise<number> {
+  const result = await db
+    .prepare(
+      `DELETE FROM subdomains
+       WHERE id = ?`
+    )
+    .bind(subdomainId)
+    .run();
+
+  return result.meta?.changes ?? 0;
+}
+
 export async function insertSubdomains(
   db: D1Database,
   fullDomains: Array<{ label: string; fullDomain: string }>

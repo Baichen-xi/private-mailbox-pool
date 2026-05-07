@@ -30,6 +30,12 @@ export interface MailboxInsertArgs {
   retentionDays?: number | null;
 }
 
+export interface MailboxDeletionCandidate {
+  id: string;
+  full_address: string;
+  total_email_count: number;
+}
+
 export async function createMailbox(
   db: D1Database,
   args: MailboxInsertArgs
@@ -204,6 +210,56 @@ export async function deleteMailboxesWithoutEmails(db: D1Database): Promise<numb
              AND emails.deleted_at IS NULL
          )`
     )
+    .run();
+
+  return result.meta?.changes ?? 0;
+}
+
+export async function listMailboxDeletionCandidatesBySubdomain(
+  db: D1Database,
+  subdomainId: string
+): Promise<MailboxDeletionCandidate[]> {
+  const result = await db
+    .prepare(
+      `SELECT
+         id,
+         full_address,
+         total_email_count
+       FROM mailboxes
+       WHERE subdomain_id = ?
+         AND deleted_at IS NULL
+       ORDER BY created_at DESC`
+    )
+    .bind(subdomainId)
+    .all<MailboxDeletionCandidate>();
+
+  return result.results ?? [];
+}
+
+export async function deleteMailboxById(db: D1Database, mailboxId: string): Promise<number> {
+  const result = await db
+    .prepare(
+      `DELETE FROM mailboxes
+       WHERE id = ?
+         AND deleted_at IS NULL`
+    )
+    .bind(mailboxId)
+    .run();
+
+  return result.meta?.changes ?? 0;
+}
+
+export async function deleteMailboxesBySubdomainId(
+  db: D1Database,
+  subdomainId: string
+): Promise<number> {
+  const result = await db
+    .prepare(
+      `DELETE FROM mailboxes
+       WHERE subdomain_id = ?
+         AND deleted_at IS NULL`
+    )
+    .bind(subdomainId)
     .run();
 
   return result.meta?.changes ?? 0;

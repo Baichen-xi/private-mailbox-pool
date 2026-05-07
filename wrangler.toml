@@ -18,7 +18,7 @@ name = "EMAIL"
 
 [vars]
 APP_NAME = "Private Mailbox Pool"
-BASE_DOMAIN = "sluttywifenight.online"
+BASE_DOMAIN = "example.com"
 COOKIE_NAME = "pmp_session"
 SESSION_TTL_HOURS = "24"
 MAX_LOGIN_FAILURES = "10"

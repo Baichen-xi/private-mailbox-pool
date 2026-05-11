@@ -1,21 +1,14 @@
 # API Contract
 
-This document defines the MVP HTTP contract for the private mailbox pool. All endpoints are served from the Cloudflare Worker under `/api`.
+This document reflects the endpoints currently implemented by the Worker. Responses are JSON unless the endpoint downloads mail or attachments. Admin endpoints require the authenticated session cookie.
 
-## Conventions
-
-- Response body is JSON unless otherwise noted.
-- Timestamps use ISO 8601 UTC strings.
-- IDs use ULID or UUIDv7.
-- Authenticated admin requests use a secure session cookie.
-- Mailbox token requests use `Authorization: Bearer <token>`.
-- Errors use the same shape everywhere:
+## Errors
 
 ```json
 {
   "error": {
-    "code": "INVALID_CREDENTIALS",
-    "message": "Username or password is incorrect."
+    "code": "INVALID_INPUT",
+    "message": "Unable to continue"
   }
 }
 ```
@@ -23,8 +16,6 @@ This document defines the MVP HTTP contract for the private mailbox pool. All en
 ## Auth
 
 ### `POST /api/auth/login`
-
-Authenticates the admin and creates a session.
 
 Request:
 
@@ -35,429 +26,233 @@ Request:
 }
 ```
 
-Success `200`:
+Success `200` with `Set-Cookie`:
 
 ```json
 {
   "ok": true,
   "session": {
-    "expiresAt": "2026-05-07T08:00:00Z"
+    "expiresAt": "2026-05-07T08:00:00.000Z"
   }
 }
 ```
-
-Failure codes:
-- `INVALID_CREDENTIALS`
-- `LOGIN_BLOCKED`
-- `RATE_LIMITED`
 
 ### `POST /api/auth/logout`
 
-Revokes the current session.
-
-Success `200`:
-
-```json
-{ "ok": true }
-```
+Signs out the current session.
 
 ### `GET /api/session`
 
-Returns the current admin session and top-level permissions.
+Returns the current auth state and whether Cloudflare Access is enabled.
 
-Success `200`:
-
-```json
-{
-  "authenticated": true,
-  "admin": {
-    "id": "01J...",
-    "username": "admin"
-  },
-  "security": {
-    "cloudflareAccessRequired": true
-  }
-}
-```
-
-## Dashboard
+## Dashboard And Admin
 
 ### `GET /api/dashboard`
 
-Returns top-level metrics and recent events.
+Returns mailbox counts, unread mail, available subdomains, and recent security alerts.
 
-Success `200`:
+### `GET /api/admin/overview`
+
+Returns admin accounts, sessions, login attempts, suspicious IPs, and health checks.
+
+### `POST /api/admin/password`
+
+Changes the current admin password.
+
+### `POST /api/admin/sessions/:id/revoke`
+
+Forces a session to sign out.
+
+### `POST /api/admin/login-attempts/clear`
+
+Request:
+
+```json
+{ "ipAddress": "203.0.113.10" }
+```
+
+Clears failed login attempts for the IP.
+
+## Subdomain Pool
+
+### `GET /api/subdomains`
+
+Returns subdomains and pool summary.
+
+### `POST /api/subdomains/generate`
+
+Creates random or custom subdomains.
 
 ```json
 {
-  "stats": {
-    "mailboxCount": 12,
-    "activeMailboxCount": 10,
-    "unreadEmailCount": 8,
-    "availableSubdomainCount": 34
-  },
-  "recentEmails": [
-    {
-      "id": "01J...",
-      "mailboxId": "01J...",
-      "subject": "Verify your account",
-      "fromAddress": "noreply@example.org",
-      "receivedAt": "2026-05-06T09:32:12Z"
-    }
-  ],
-  "securityAlerts": [
-    {
-      "id": "01J...",
-      "level": "warning",
-      "message": "5 failed login attempts from 1 IP in the last hour."
-    }
-  ]
+  "count": 20,
+  "labelLength": 4,
+  "customLabels": "vip\nregister"
 }
 ```
+
+### `POST /api/subdomains/:id/verification`
+
+Manually sets verification status.
+
+```json
+{ "verificationStatus": "verified" }
+```
+
+Allowed values: `verified`, `unverified`, `invalid`.
+
+### `POST /api/subdomains/:id/verify`
+
+Checks DNS MX for the exact subdomain. When Cloudflare Email Routing MX is found, the Worker also tries to use `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ZONE_ID` to confirm zone Email Routing settings.
+
+If the Cloudflare API variables are not configured, the endpoint falls back to public DNS only: Cloudflare MX marks it `verified`; no MX marks it `invalid`; non-Cloudflare MX keeps it `unverified`.
+
+### `POST /api/subdomains/verify-all`
+
+Checks all current subdomains. Each result includes `verificationStatus`, `mxRecords`, `routingDetected`, and `apiChecked`.
+
+### `POST /api/subdomains/:id/delete`
+
+Deletes a subdomain. If it has mailboxes, those mailboxes and related storage are deleted too.
+
+### `POST /api/subdomains/delete-all`
+
+Deletes only unused subdomains.
+
+## Mailbox Groups
+
+### `GET /api/mailbox-groups`
+
+Returns groups with active mailbox counts.
+
+### `POST /api/mailbox-groups`
+
+Creates a group.
+
+```json
+{
+  "name": "registrations",
+  "color": "#156f5b"
+}
+```
+
+### `POST /api/mailbox-groups/:id`
+
+Renames a group or changes its color.
+
+```json
+{
+  "name": "banking",
+  "color": "#7c3aed"
+}
+```
+
+### `POST /api/mailbox-groups/:id/delete`
+
+Deletes an empty group. Groups with mailboxes return `MAILBOX_GROUP_NOT_EMPTY`.
 
 ## Mailboxes
 
 ### `GET /api/mailboxes`
 
-Returns paginated mailboxes.
-
-Query params:
-- `q`
-- `status`
-- `cursor`
-- `limit`
-
-Success `200`:
-
-```json
-{
-  "items": [
-    {
-      "id": "01J...",
-      "localPart": "hello",
-      "fullAddress": "hello@a1b2.example.com",
-      "status": "active",
-      "note": "GitHub signup",
-      "retentionMode": "keep_forever",
-      "lastReceivedAt": "2026-05-06T09:32:12Z",
-      "totalEmailCount": 14,
-      "unreadEmailCount": 2,
-      "createdAt": "2026-05-01T08:00:00Z"
-    }
-  ],
-  "nextCursor": null
-}
-```
+Returns mailboxes and summary. Items include `groupId`, `groupName`, `groupColor`, `status`, `note`, and `totalEmailCount`.
 
 ### `POST /api/mailboxes`
 
-Creates a mailbox and assigns an available subdomain.
-
-Request:
+Creates a mailbox. Empty `subdomainId` uses the random pool; `candidateSubdomainId` can pass the visible candidate from the UI.
 
 ```json
 {
+  "subdomainId": "",
+  "candidateSubdomainId": "subdomain-id",
+  "groupId": "group-id",
   "localPartMode": "custom",
   "localPart": "hello",
-  "note": "GitHub signup",
-  "retentionMode": "keep_forever",
-  "retentionDays": null
+  "note": "GitHub signup"
 }
 ```
 
-Rules:
-- `localPartMode` can be `random` or `custom`.
-- If `custom`, `localPart` is required.
-- The system assigns the next available subdomain automatically.
-
-Success `201`:
-
-```json
-{
-  "mailbox": {
-    "id": "01J...",
-    "fullAddress": "hello@a1b2.example.com",
-    "status": "active"
-  }
-}
-```
-
-Failure codes:
-- `NO_SUBDOMAIN_AVAILABLE`
-- `LOCAL_PART_TAKEN`
-- `INVALID_LOCAL_PART`
-- `RATE_LIMITED`
+If the same address was soft-deleted before, creating it again restores the previous mailbox and mail.
 
 ### `GET /api/mailboxes/:id`
 
-Returns one mailbox and current subdomain metadata.
+Returns mailbox detail.
 
-### `PATCH /api/mailboxes/:id`
+### `POST /api/mailboxes/:id/metadata`
 
-Updates mailbox metadata.
-
-Request:
+Updates note and group.
 
 ```json
 {
-  "status": "paused",
-  "note": "Do not use this week",
-  "retentionMode": "delete_after_days",
-  "retentionDays": 30
+  "note": "new note",
+  "groupId": "group-id"
 }
 ```
 
-### `DELETE /api/mailboxes/:id`
+### `POST /api/mailboxes/:id/status`
 
-Soft-deletes a mailbox. Raw objects in R2 remain until background cleanup completes.
-
-Success `200`:
+Pauses or resumes receiving.
 
 ```json
-{ "ok": true }
+{ "status": "paused" }
 ```
 
-### `POST /api/mailboxes/:id/tokens`
+Allowed values: `active`, `paused`, `archived`. Only `active` accepts inbound mail.
 
-Creates a mailbox access token for read-only or read-write access.
+### `POST /api/mailboxes/:id/note`
 
-Request:
+Updates only the note.
 
-```json
-{
-  "tokenName": "Desktop viewer",
-  "scope": "read",
-  "expiresAt": null
-}
-```
+### `POST /api/mailboxes/:id/delete`
 
-Success `201`:
+Deletes a mailbox. Empty mailboxes are hard-deleted; mailboxes with mail are soft-deleted and can be restored by recreating the same address.
 
-```json
-{
-  "token": {
-    "id": "01J...",
-    "plainText": "mbx_live_...",
-    "scope": "read"
-  }
-}
-```
+### `POST /api/mailboxes/cleanup-empty`
+
+Hard-deletes all mailboxes without mail.
 
 ## Emails
 
 ### `GET /api/mailboxes/:id/emails`
 
-Returns paginated email summaries for a mailbox.
+Returns email summaries for a mailbox.
 
-Query params:
-- `cursor`
-- `limit`
-- `q`
-- `unreadOnly`
+### `GET /api/mailboxes/:id/emails/:emailId`
 
-Success `200`:
+Returns email detail, text body, safe HTML preview, and attachment links.
 
-```json
-{
-  "items": [
-    {
-      "id": "01J...",
-      "subject": "Verify your account",
-      "fromName": "GitHub",
-      "fromAddress": "noreply@github.com",
-      "receivedAt": "2026-05-06T09:32:12Z",
-      "isRead": false,
-      "hasAttachments": false,
-      "textPreview": "Please verify your email address..."
-    }
-  ],
-  "nextCursor": null
-}
-```
+### `POST /api/mailboxes/:id/emails/mark-read`
 
-### `GET /api/emails/:id`
-
-Returns one email with sanitized content references.
-
-Success `200`:
+Bulk marks emails as read.
 
 ```json
-{
-  "email": {
-    "id": "01J...",
-    "mailboxId": "01J...",
-    "subject": "Verify your account",
-    "fromName": "GitHub",
-    "fromAddress": "noreply@github.com",
-    "toAddress": "hello@a1b2.example.com",
-    "receivedAt": "2026-05-06T09:32:12Z",
-    "isRead": false,
-    "textBody": "Please verify your email address...",
-    "htmlBody": "<p>Please verify your email address...</p>",
-    "headers": {
-      "message-id": "<...>"
-    },
-    "attachments": [
-      {
-        "id": "01J...",
-        "filename": "invoice.pdf",
-        "contentType": "application/pdf",
-        "sizeBytes": 10240
-      }
-    ]
-  }
-}
+{ "emailIds": ["email-id"] }
 ```
 
-### `PATCH /api/emails/:id/read`
+### `POST /api/mailboxes/:id/emails/delete`
 
-Marks an email read or unread.
+Bulk soft-deletes emails.
 
-Request:
+### `GET /api/mailboxes/:id/emails/:emailId/raw`
 
-```json
-{
-  "isRead": true
-}
-```
+Downloads the raw `.eml`.
 
-### `DELETE /api/emails/:id`
+### `GET /api/mailboxes/:id/emails/:emailId/attachments/:attachmentId`
 
-Soft-deletes a single email.
+Downloads an attachment.
 
-### `GET /api/emails/:id/raw`
+### `GET /api/mailboxes/:id/emails/:emailId/attachments/:attachmentId/preview`
 
-Downloads the raw `.eml` payload.
+Previews displayable image attachments.
 
-Response:
-- `200 text/plain` or `message/rfc822`
+## Maintenance
 
-### `GET /api/emails/:id/attachments/:attachmentId`
+### `POST /api/maintenance/run`
 
-Streams one attachment from R2.
+Manually runs production maintenance: expired mail cleanup, old soft-deleted mailbox archival, and an R2 orphan object sample scan. Production also runs this daily through the Cron in `wrangler.toml`.
 
-Response:
-- `200` with attachment bytes
+## Health
 
-## Subdomains
+### `GET /health`
 
-### `GET /api/subdomains`
-
-Returns the current subdomain pool.
-
-Query params:
-- `status`
-- `cursor`
-- `limit`
-
-### `POST /api/subdomains/generate`
-
-Generates a batch of subdomains and stores them in the pool.
-
-Request:
-
-```json
-{
-  "count": 50,
-  "labelLength": 4
-}
-```
-
-Success `201`:
-
-```json
-{
-  "createdCount": 50
-}
-```
-
-### `PATCH /api/subdomains/:id`
-
-Allows disabling or reserving a subdomain.
-
-Request:
-
-```json
-{
-  "status": "disabled",
-  "note": "Used by a service that blocked it"
-}
-```
-
-### `POST /api/subdomains/rebalance`
-
-Ensures the pool has at least the configured minimum available count.
-
-## Settings
-
-### `GET /api/settings`
-
-Returns grouped app settings.
-
-### `PATCH /api/settings`
-
-Updates supported settings only.
-
-Request:
-
-```json
-{
-  "mail": {
-    "allowCustomLocalPart": true,
-    "maxAttachmentSizeMb": 10
-  },
-  "security": {
-    "maxLoginFailures": 10,
-    "loginBlockMinutes": 15
-  }
-}
-```
-
-## Audit Logs
-
-### `GET /api/audit-logs`
-
-Returns paginated audit events.
-
-Query params:
-- `action`
-- `targetType`
-- `cursor`
-- `limit`
-
-Success `200`:
-
-```json
-{
-  "items": [
-    {
-      "id": "01J...",
-      "action": "mailbox.created",
-      "actorType": "admin",
-      "actorId": "01J...",
-      "targetType": "mailbox",
-      "targetId": "01J...",
-      "ipAddress": "203.0.113.8",
-      "createdAt": "2026-05-06T10:00:00Z"
-    }
-  ],
-  "nextCursor": null
-}
-```
-
-## Worker-only inbound email flow
-
-### `email(message, env, ctx)`
-
-This is not a public HTTP endpoint. Cloudflare Email Routing invokes the Worker with an inbound message.
-
-Required processing steps:
-
-1. Resolve the `to` address to a mailbox.
-2. Reject if mailbox is missing or paused.
-3. Parse MIME safely.
-4. Store raw payload in R2.
-5. Store text body, sanitized HTML body, and attachment objects in R2.
-6. Insert metadata rows in D1.
-7. Update mailbox counters.
-8. Write an `email.received` audit log entry.
+Returns service liveness.

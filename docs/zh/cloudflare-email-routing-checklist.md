@@ -76,6 +76,8 @@ curl -X POST "http://localhost:8787/cdn-cgi/handler/email?from=sender@example.co
 ### 4. 应用配置
 
 - `BASE_DOMAIN` 与生产域名一致
+- `CLOUDFLARE_ZONE_ID` 已作为普通变量添加
+- `CLOUDFLARE_API_TOKEN` 已作为 Secret 添加，权限至少包含 Zone Read、DNS Read、Email Routing Rules Read
 - `BOOTSTRAP_ADMIN_PASSWORD_HASH` 已存入 Cloudflare Secret
 - 生产环境前面已经加上 Cloudflare Access
 

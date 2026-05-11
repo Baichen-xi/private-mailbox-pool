@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS subdomains (
   status TEXT NOT NULL DEFAULT 'available' CHECK (
     status IN ('available', 'assigned', 'reserved', 'disabled')
   ),
+  verification_status TEXT NOT NULL DEFAULT 'unverified' CHECK (
+    verification_status IN ('verified', 'unverified', 'invalid')
+  ),
   assigned_mailbox_id TEXT,
   note TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -46,11 +49,21 @@ CREATE TABLE IF NOT EXISTS subdomains (
 );
 
 CREATE INDEX IF NOT EXISTS idx_subdomains_status ON subdomains(status);
+CREATE INDEX IF NOT EXISTS idx_subdomains_verification_status ON subdomains(verification_status);
+
+CREATE TABLE IF NOT EXISTS mailbox_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  color TEXT NOT NULL DEFAULT '#156f5b',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 CREATE TABLE IF NOT EXISTS mailboxes (
   id TEXT PRIMARY KEY,
   local_part TEXT NOT NULL,
   subdomain_id TEXT NOT NULL,
+  group_id TEXT,
   full_address TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL DEFAULT 'active' CHECK (
     status IN ('active', 'paused', 'archived', 'deleted')
@@ -69,13 +82,15 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   deleted_at TEXT,
-  FOREIGN KEY (subdomain_id) REFERENCES subdomains(id)
+  FOREIGN KEY (subdomain_id) REFERENCES subdomains(id),
+  FOREIGN KEY (group_id) REFERENCES mailbox_groups(id)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mailboxes_local_part_subdomain
   ON mailboxes(local_part, subdomain_id);
 CREATE INDEX IF NOT EXISTS idx_mailboxes_status ON mailboxes(status);
 CREATE INDEX IF NOT EXISTS idx_mailboxes_last_received_at ON mailboxes(last_received_at);
+CREATE INDEX IF NOT EXISTS idx_mailboxes_group_id ON mailboxes(group_id);
 
 CREATE TABLE IF NOT EXISTS mailbox_tokens (
   id TEXT PRIMARY KEY,

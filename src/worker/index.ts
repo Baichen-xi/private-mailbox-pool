@@ -1,6 +1,10 @@
-﻿import PostalMime, { type Address, type Email } from "postal-mime";
+﻿import PostalMime, { type Address } from "postal-mime";
 import type { Env } from "./env";
+import { parseJsonBody } from "./api/body";
 import { getBooleanVar, getNumberVar } from "./env";
+import { htmlToReadableText, sanitizeHtmlEmail, wrapSanitizedHtmlDocument } from "./html-sanitizer/email";
+import { buildEmailStoragePrefix, buildPreview, resolveReceivedAt, sanitizeKeyPart, toAttachmentBytes } from "./mail/storage";
+import { renderLayout } from "./pages/layout";
 import { getAuthenticatedAdmin, createSessionCookie, clearSessionCookie } from "./auth/sessions";
 import {
   getAdminPanelStats,
@@ -14,6 +18,8 @@ import { ensureBootstrapAdmin, getAdminById, getAdminByUsername, markAdminLogin,
 import {
   createAttachmentRecord,
   getAttachmentById,
+  listAllAttachmentKeys,
+  listAttachmentKeysForEmails,
   listAttachmentKeysForMailbox,
   listAttachmentsForEmail
 } from "./db/attachments";
@@ -21,9 +27,20 @@ import { writeAuditLog } from "./db/audit-logs";
 import { getDashboardStats, getRecentFailedLoginAlert } from "./db/dashboard";
 import { getDatabaseHealth } from "./db/health";
 import {
+  countMailboxesInGroup,
+  createMailboxGroup,
+  deleteMailboxGroupById,
+  getMailboxGroupById,
+  listMailboxGroups,
+  updateMailboxGroup
+} from "./db/mailbox-groups";
+import {
   createEmailRecord,
   findEmailByMailboxAndMessageId,
   getEmailById,
+  hardDeleteEmailsByIds,
+  listAllEmailStorageKeys,
+  listExpiredEmailsForRetention,
   listEmailStorageKeysForMailbox,
   listEmailsForMailbox,
   markEmailAsRead,
@@ -39,27 +56,36 @@ import {
   deleteMailboxesBySubdomainId,
   deleteMailboxesWithoutEmails,
   decrementMailboxUnreadCount,
+  findDeletedMailboxByAddress,
   findMailboxByAddress,
   getMailboxById,
   getMailboxSummary,
   incrementMailboxCounters,
   listMailboxDeletionCandidatesBySubdomain,
   listMailboxes,
-  refreshMailboxEmailCounters
+  archiveSoftDeletedMailboxes,
+  refreshMailboxEmailCounters,
+  restoreDeletedMailbox,
+  softDeleteMailboxById,
+  updateMailboxStatus,
+  updateMailboxMetadata,
+  updateMailboxNote
 } from "./db/mailboxes";
 import {
   deleteSubdomainById,
   deleteUnusedSubdomains,
   findAvailableSubdomain,
+  findSubdomainByIdForMailboxCreation,
   getSubdomainById,
   getSubdomainSummary,
   insertSubdomains,
-  listSubdomains
+  listSubdomains,
+  updateSubdomainVerificationStatus
 } from "./db/subdomains";
 import { getSessionById, revokeOtherSessionsForAdmin, revokeSessionById } from "./db/sessions";
 import { createId } from "./lib/ids";
 import { errorResponse, html, json, redirect } from "./lib/responses";
-import { nowTimestamp, toSqliteTimestamp } from "./lib/time";
+import { nowTimestamp } from "./lib/time";
 
 type Locale = "en" | "zh";
 
@@ -88,7 +114,6 @@ const translations = {
     english: "English",
     unableToSignIn: "Unable to sign in.",
     signedInAs: "Signed in as",
-    milestoneShell: "This is the private shell for Milestone 1.",
     logOut: "Sign out",
     dashboard: "Dashboard",
     adminPanel: "Admin",
@@ -97,11 +122,6 @@ const translations = {
     unreadEmails: "Unread emails",
     availableSubdomains: "Available subdomains",
     activeMailboxes: "Active mailboxes",
-    nextBuildTargets: "Next build targets",
-    nextBuildTargetsBody: "Mailbox CRUD, subdomain pool management, and inbound email persistence come next.",
-    configReminder: "Config reminder",
-    configReminderBody:
-      "Before the first login, set BOOTSTRAP_ADMIN_PASSWORD_HASH or BOOTSTRAP_ADMIN_PASSWORD_PLAIN, and replace the D1 database placeholder in wrangler.toml.",
     openMailboxWorkspace: "Open workspace",
     openAdminPanel: "Open admin panel",
     mailboxWorkspaceSubtitle: "Manage receiving domains, create long-lived mailboxes, and keep the current pool organized.",
@@ -117,6 +137,33 @@ const translations = {
     localPartMode: "Local part mode",
     selectedSubdomain: "Subdomain",
     randomSubdomainOption: "Auto assign (random pool)",
+    selectedGroup: "Group",
+    noGroupOption: "No group",
+    createGroup: "Create group",
+    groupName: "Group name",
+    groupNamePlaceholder: "example: registrations",
+    groupCreatedSuccess: "Group created: {name}",
+    groupColor: "Group color",
+    groupManagement: "Group management",
+    groupManagementBody: "Rename groups, adjust colors, and remove groups that no longer contain mailboxes.",
+    groupUpdatedSuccess: "Group updated: {name}",
+    groupDeletedSuccess: "Group deleted: {name}",
+    saveGroup: "Save group",
+    deleteGroup: "Delete group",
+    noGroupsYet: "No groups yet.",
+    invalidGroupColor: "Choose a valid hex color.",
+    groupNotEmpty: "Only empty groups can be deleted.",
+    groupFilterLabel: "Group filter",
+    allGroups: "All groups",
+    groupColumn: "Group",
+    invalidGroupName: "Group name must be 1-40 characters.",
+    mailboxRestored: "Mailbox restored with previous mail: {address}",
+    editSelectedMailbox: "Edit selected mailbox",
+    saveMailboxChanges: "Save changes",
+    mailboxUpdatedSuccess: "Mailbox updated: {address}",
+    mailboxStatusUpdatedSuccess: "Mailbox status updated: {address}",
+    selectedMailboxEditorEmpty: "Select a mailbox in the list to edit its status, group, and note.",
+    selectedMailboxEditorHint: "Changes only affect mailbox metadata. Existing mail remains untouched.",
     subdomainStrategyTitle: "Subdomain assignment",
     subdomainStrategyAutoEyebrow: "Random pool",
     subdomainStrategyAutoTitle: "Mailboxes will use the random subdomain pool.",
@@ -135,6 +182,11 @@ const translations = {
     note: "Note",
     notePlaceholder: "Why are you creating this inbox?",
     noNote: "No note",
+    editNote: "Edit note",
+    saveNote: "Save note",
+    noteHelp: "Up to 140 characters. Leave empty to clear the note.",
+    noteUpdatedSuccess: "Note updated.",
+    noteTooLong: "Note must be 140 characters or fewer.",
     createNow: "Create mailbox",
     refreshData: "Refresh",
     mailboxList: "Mailbox list",
@@ -218,6 +270,9 @@ const translations = {
     summaryAvailable: "Available",
     summaryAssigned: "In use",
     summaryDisabled: "Disabled",
+    summaryVerified: "Verified",
+    summaryUnverified: "Unverified",
+    summaryInvalid: "Invalid",
     summaryPaused: "Paused",
     statusActive: "Active",
     statusPaused: "Paused",
@@ -227,6 +282,21 @@ const translations = {
     statusAssigned: "Assigned",
     statusReserved: "Reserved",
     statusDisabled: "Disabled",
+    verificationStatusVerified: "Verified",
+    verificationStatusUnverified: "Unverified",
+    verificationStatusInvalid: "Invalid",
+    subdomainVerificationUpdated: "Domain verification status updated.",
+    verifySubdomainNow: "Check DNS",
+    verifyAllSubdomains: "Check all DNS",
+    subdomainVerificationChecked: "{domain}: {status}. {detail}",
+    subdomainVerificationBatchChecked: "Checked {count} domains.",
+    subdomainMxCloudflare: "Cloudflare Email Routing MX was found.",
+    subdomainMxAndRoutingCloudflare: "Cloudflare Email Routing MX and zone routing settings were found.",
+    subdomainMxCloudflareRoutingMissing: "Cloudflare MX was found, but Email Routing could not be confirmed through the API.",
+    subdomainMxCloudflareApiNotConfigured: "Cloudflare MX was found. Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID to also check Email Routing settings.",
+    subdomainMxOther: "MX exists, but it does not look like Cloudflare Email Routing.",
+    subdomainMxMissing: "No MX record was found for this exact subdomain.",
+    subdomainMxTemporary: "DNS check could not complete. Kept as unverified.",
     noSubdomainAvailable: "No available subdomain exists yet. Generate a batch first.",
     noSuchSubdomain: "The selected subdomain does not exist or is disabled.",
     deleteEmptyMailboxes: "Clear empty mailboxes",
@@ -362,6 +432,7 @@ const translations = {
     confirmDialogDeleteAction: "Delete",
     confirmDialogCleanupAction: "Clear",
     confirmDialogIrreversible: "This action cannot be undone.",
+    maintenanceRanSuccess: "Maintenance finished: {summary}",
     invalidCredentials: "Username or password is incorrect.",
     loginBlocked: "Too many failed attempts. Try again in {minutes} minutes.",
     invalidInput: "Username and password are required.",
@@ -401,7 +472,6 @@ const translations = {
     english: "English",
     unableToSignIn: "登录失败。",
     signedInAs: "当前登录账号",
-    milestoneShell: "这是里程碑 1 的私有应用外壳。",
     logOut: "退出",
     dashboard: "仪表盘",
     adminPanel: "管理员",
@@ -410,11 +480,6 @@ const translations = {
     unreadEmails: "未读邮件",
     availableSubdomains: "可用子域名",
     activeMailboxes: "活跃邮箱",
-    nextBuildTargets: "下一步开发重点",
-    nextBuildTargetsBody: "接下来会继续实现邮箱 CRUD、子域名池管理和入站邮件持久化。",
-    configReminder: "配置提醒",
-    configReminderBody:
-      "首次登录前请先设置 BOOTSTRAP_ADMIN_PASSWORD_HASH 或 BOOTSTRAP_ADMIN_PASSWORD_PLAIN，并把 wrangler.toml 里的 D1 占位数据库 ID 换成真实值。",
     openMailboxWorkspace: "打开工作台",
     openAdminPanel: "打开管理员面板",
     mailboxWorkspaceSubtitle: "集中管理接收域名、创建长期邮箱，并维护当前资源池。",
@@ -430,6 +495,33 @@ const translations = {
     localPartMode: "邮箱前缀模式",
     selectedSubdomain: "子域名",
     randomSubdomainOption: "自动分配（随机子域名）",
+    selectedGroup: "分组",
+    noGroupOption: "不分组",
+    createGroup: "创建分组",
+    groupName: "分组名称",
+    groupNamePlaceholder: "例如：注册专用",
+    groupCreatedSuccess: "已创建分组：{name}",
+    groupColor: "分组颜色",
+    groupManagement: "分组管理",
+    groupManagementBody: "可在这里重命名分组、调整颜色，并删除不含邮箱的空分组。",
+    groupUpdatedSuccess: "分组已更新：{name}",
+    groupDeletedSuccess: "分组已删除：{name}",
+    saveGroup: "保存分组",
+    deleteGroup: "删除分组",
+    noGroupsYet: "暂时还没有分组。",
+    invalidGroupColor: "请选择有效的十六进制颜色。",
+    groupNotEmpty: "只能删除不含邮箱的空分组。",
+    groupFilterLabel: "分组筛选",
+    allGroups: "全部分组",
+    groupColumn: "分组",
+    invalidGroupName: "分组名称长度需在 1-40 个字符之间。",
+    mailboxRestored: "邮箱已恢复，并重新显示原有邮件：{address}",
+    editSelectedMailbox: "编辑所选邮箱",
+    saveMailboxChanges: "保存修改",
+    mailboxUpdatedSuccess: "邮箱已更新：{address}",
+    mailboxStatusUpdatedSuccess: "邮箱状态已更新：{address}",
+    selectedMailboxEditorEmpty: "请先在列表中选择一个邮箱，再编辑状态、分组和备注。",
+    selectedMailboxEditorHint: "这里仅修改邮箱资料，不影响已保存邮件。",
     subdomainStrategyTitle: "子域名分配状态",
     subdomainStrategyAutoEyebrow: "随机子域名池",
     subdomainStrategyAutoTitle: "当前会从随机子域名池中分配邮箱后缀。",
@@ -447,6 +539,11 @@ const translations = {
     note: "备注",
     notePlaceholder: "创建这个邮箱是为了什么？",
     noNote: "无备注",
+    editNote: "修改备注",
+    saveNote: "保存备注",
+    noteHelp: "最多 140 个字符。留空保存即可清除备注。",
+    noteUpdatedSuccess: "备注已更新。",
+    noteTooLong: "备注不能超过 140 个字符。",
     createNow: "创建邮箱",
     refreshData: "刷新",
     mailboxList: "邮箱列表",
@@ -530,6 +627,9 @@ const translations = {
     summaryAvailable: "可用",
     summaryAssigned: "已使用",
     summaryDisabled: "已禁用",
+    summaryVerified: "已验证",
+    summaryUnverified: "未验证",
+    summaryInvalid: "已失效",
     summaryPaused: "已暂停",
     statusActive: "活跃",
     statusPaused: "暂停",
@@ -539,6 +639,21 @@ const translations = {
     statusAssigned: "已分配",
     statusReserved: "已保留",
     statusDisabled: "已禁用",
+    verificationStatusVerified: "已验证",
+    verificationStatusUnverified: "未验证",
+    verificationStatusInvalid: "已失效",
+    subdomainVerificationUpdated: "域名验证状态已更新。",
+    verifySubdomainNow: "检测 DNS",
+    verifyAllSubdomains: "批量检测 DNS",
+    subdomainVerificationChecked: "{domain}：{status}。{detail}",
+    subdomainVerificationBatchChecked: "已检测 {count} 个域名。",
+    subdomainMxCloudflare: "已找到 Cloudflare Email Routing MX。",
+    subdomainMxAndRoutingCloudflare: "已找到 Cloudflare Email Routing MX，并且已通过 API 确认区域邮件路由配置。",
+    subdomainMxCloudflareRoutingMissing: "已找到 Cloudflare MX，但 API 未能确认 Email Routing 配置。",
+    subdomainMxCloudflareApiNotConfigured: "已找到 Cloudflare MX。添加 CLOUDFLARE_API_TOKEN 和 CLOUDFLARE_ZONE_ID 后，可进一步检测 Email Routing 配置。",
+    subdomainMxOther: "检测到 MX，但看起来不是 Cloudflare Email Routing。",
+    subdomainMxMissing: "没有找到该子域名自己的 MX 记录。",
+    subdomainMxTemporary: "DNS 检测暂时未完成，已保持为未验证。",
     noSubdomainAvailable: "当前没有可用子域名，请先生成一批。",
     noSuchSubdomain: "所选子域名不存在或已被禁用。",
     deleteEmptyMailboxes: "清理空邮箱",
@@ -673,6 +788,7 @@ const translations = {
     confirmDialogDeleteAction: "删除",
     confirmDialogCleanupAction: "清理",
     confirmDialogIrreversible: "此操作执行后无法撤销。",
+    maintenanceRanSuccess: "维护任务已完成：{summary}",
     invalidCredentials: "用户名或密码不正确。",
     loginBlocked: "失败次数过多，请在 {minutes} 分钟后再试。",
     invalidInput: "用户名和密码不能为空。",
@@ -808,977 +924,6 @@ function renderNav(pathname: string, locale: Locale): string {
       )
       .join("")}
   </nav>`;
-}
-
-function renderLayout(title: string, body: string, locale: Locale): string {
-  return `<!doctype html>
-<html lang="${locale}">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>${title}</title>
-    <style>
-      :root {
-        color-scheme: light;
-        --bg: #f3f1ea;
-        --bg-soft: #f8f6f0;
-        --panel: #fffdfa;
-        --panel-soft: rgba(255, 255, 255, 0.78);
-        --text: #1f1b16;
-        --muted: #666055;
-        --line: #d9d2c4;
-        --line-strong: #c8bead;
-        --accent: #156f5b;
-        --accent-strong: #0f5848;
-        --accent-soft: rgba(21, 111, 91, 0.08);
-        --danger: #9b2c2c;
-      }
-      * { box-sizing: border-box; }
-      [hidden] {
-        display: none !important;
-      }
-      html {
-        font-size: 16px;
-      }
-      body {
-        margin: 0;
-        font-family: "Segoe UI", "Noto Sans", sans-serif;
-        color: var(--text);
-        line-height: 1.5;
-        background:
-          radial-gradient(circle at top right, rgba(209, 230, 223, 0.45) 0%, rgba(209, 230, 223, 0) 28%),
-          radial-gradient(circle at top left, rgba(241, 227, 197, 0.45) 0%, rgba(241, 227, 197, 0) 24%),
-          linear-gradient(180deg, #f8f6f0 0%, #efebe2 100%);
-      }
-      a {
-        color: var(--accent-strong);
-        text-decoration: none;
-      }
-      a:hover {
-        text-decoration: underline;
-        text-decoration-color: rgba(15, 88, 72, 0.3);
-      }
-      .shell {
-        min-height: 100vh;
-        display: flex;
-        align-items: flex-start;
-        justify-content: center;
-        padding: 32px 20px 48px;
-      }
-      .shell--centered {
-        align-items: center;
-      }
-      .panel {
-        width: min(1180px, 100%);
-        background: rgba(255, 253, 248, 0.95);
-        border: 1px solid rgba(201, 193, 177, 0.75);
-        border-radius: 12px;
-        box-shadow:
-          0 24px 70px rgba(32, 25, 16, 0.08),
-          0 2px 12px rgba(32, 25, 16, 0.04);
-        overflow: hidden;
-        backdrop-filter: blur(10px);
-      }
-      .panel--narrow {
-        width: min(480px, 100%);
-      }
-      .header {
-        padding: 28px 32px 24px;
-        border-bottom: 1px solid var(--line);
-        background:
-          linear-gradient(135deg, rgba(21, 111, 91, 0.1), rgba(255, 255, 255, 0) 44%),
-          linear-gradient(180deg, rgba(255, 255, 255, 0.76), rgba(255, 255, 255, 0.28));
-      }
-      .header-top {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 14px;
-        margin-bottom: 16px;
-        flex-wrap: wrap;
-      }
-      .content {
-        padding: 28px 32px 32px;
-      }
-      h1 {
-        margin: 0 0 8px;
-        font-size: clamp(28px, 3vw, 36px);
-        line-height: 1.06;
-        font-weight: 700;
-      }
-      h2 {
-        margin: 0;
-        font-size: 18px;
-        line-height: 1.25;
-        font-weight: 700;
-      }
-      p {
-        margin: 0;
-        color: var(--muted);
-        line-height: 1.6;
-      }
-      form {
-        display: grid;
-        gap: 18px;
-      }
-      label {
-        display: grid;
-        gap: 8px;
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--muted);
-      }
-      input, select, textarea {
-        appearance: none;
-        width: 100%;
-        padding: 12px 14px;
-        border-radius: 10px;
-        border: 1px solid var(--line);
-        background: #fff;
-        font: inherit;
-        color: var(--text);
-        transition: border-color 140ms ease, box-shadow 140ms ease, background 140ms ease;
-      }
-      input:focus,
-      select:focus,
-      textarea:focus {
-        outline: none;
-        border-color: rgba(21, 111, 91, 0.65);
-        box-shadow: 0 0 0 4px rgba(21, 111, 91, 0.12);
-      }
-      input:disabled,
-      select:disabled,
-      textarea:disabled {
-        background: #f6f3ec;
-        color: #8c8578;
-      }
-      input[type="checkbox"] {
-        appearance: auto;
-        width: 18px;
-        height: 18px;
-        padding: 0;
-        margin: 0;
-        border-radius: 6px;
-        border: 1px solid var(--line-strong);
-        background: white;
-        accent-color: var(--accent);
-        cursor: pointer;
-        box-shadow: none;
-      }
-      input[type="checkbox"]:focus {
-        outline: none;
-        box-shadow: 0 0 0 3px rgba(21, 111, 91, 0.14);
-      }
-      textarea {
-        min-height: 96px;
-        resize: vertical;
-      }
-      button {
-        appearance: none;
-        border: 0;
-        border-radius: 10px;
-        padding: 12px 16px;
-        background: linear-gradient(180deg, #1a7e67 0%, #156f5b 100%);
-        color: white;
-        font: inherit;
-        font-weight: 600;
-        cursor: pointer;
-        box-shadow: 0 10px 24px rgba(21, 111, 91, 0.18);
-        transition: transform 140ms ease, box-shadow 140ms ease, opacity 140ms ease;
-      }
-      button:not(:disabled):hover {
-        transform: translateY(-1px);
-        box-shadow: 0 14px 28px rgba(21, 111, 91, 0.2);
-      }
-      button:not(:disabled):active {
-        transform: translateY(0);
-      }
-      button:disabled {
-        cursor: not-allowed;
-        opacity: 1;
-        color: #8c8578;
-        background: linear-gradient(180deg, #efe9dc 0%, #e8e1d2 100%);
-        border: 1px solid #ddd4c4;
-        box-shadow: none;
-      }
-      button.secondary {
-        background: rgba(255, 255, 255, 0.76);
-        color: var(--accent-strong);
-        border: 1px solid var(--line);
-        box-shadow: none;
-      }
-      button.secondary:hover {
-        background: rgba(255, 255, 255, 0.96);
-        border-color: var(--line-strong);
-      }
-      button.secondary:disabled {
-        background: rgba(243, 239, 231, 0.92);
-        border-color: #ddd4c4;
-        color: #9a9285;
-      }
-      .lang-switch {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 5px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.88);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
-      }
-      .lang-link {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-width: 68px;
-        padding: 8px 12px;
-        border-radius: 999px;
-        color: var(--muted);
-        font-size: 14px;
-      }
-      .lang-link:hover {
-        text-decoration: none;
-      }
-      .lang-link.is-active {
-        background: var(--accent);
-        color: white;
-      }
-      .nav-pills {
-        display: inline-flex;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      .nav-pill {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 40px;
-        padding: 9px 14px;
-        border-radius: 999px;
-        border: 1px solid var(--line);
-        background: rgba(255, 255, 255, 0.72);
-        color: var(--muted);
-        font-size: 14px;
-        transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
-      }
-      .nav-pill:hover {
-        text-decoration: none;
-        border-color: var(--line-strong);
-        color: var(--text);
-      }
-      .nav-pill.is-active {
-        border-color: var(--accent);
-        color: var(--accent-strong);
-        background: var(--accent-soft);
-      }
-      .stack {
-        display: grid;
-        gap: 20px;
-      }
-      .title-block {
-        display: grid;
-        gap: 6px;
-      }
-      .row {
-        display: flex;
-        gap: 16px;
-        align-items: center;
-        justify-content: space-between;
-        flex-wrap: wrap;
-      }
-      .row--start {
-        align-items: flex-start;
-      }
-      .metrics {
-        display: grid;
-        gap: 14px;
-        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      }
-      .metrics--compact .metric {
-        min-height: 92px;
-        padding: 16px;
-      }
-      .metrics--compact .metric strong {
-        font-size: 28px;
-      }
-      .metric {
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 18px;
-        background: linear-gradient(180deg, #ffffff 0%, #fbf8f1 100%);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
-        min-height: 106px;
-        display: grid;
-        align-content: start;
-        gap: 8px;
-      }
-      .metric strong {
-        display: block;
-        font-size: 32px;
-        line-height: 1;
-        margin: 0;
-      }
-      .metric span {
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
-      }
-      .notice {
-        display: grid;
-        gap: 8px;
-        padding: 14px 16px;
-        border-radius: 10px;
-        border: 1px solid rgba(155, 44, 44, 0.18);
-        background: rgba(155, 44, 44, 0.06);
-        color: var(--danger);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
-      }
-      .notice__eyebrow {
-        margin: 0;
-        font-size: 12px;
-        font-weight: 700;
-        line-height: 1.2;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-      .notice__title {
-        margin: 0;
-        color: var(--text);
-        font-size: 15px;
-        font-weight: 700;
-        line-height: 1.4;
-      }
-      .notice__body {
-        margin: 0;
-        color: inherit;
-        font-size: 14px;
-        line-height: 1.6;
-      }
-      .notice--success {
-        border-color: rgba(21, 111, 91, 0.18);
-        background: rgba(21, 111, 91, 0.08);
-        color: var(--accent-strong);
-      }
-      .notice--success .notice__eyebrow {
-        color: var(--accent-strong);
-      }
-      .notice--error .notice__eyebrow {
-        color: var(--danger);
-      }
-      .notice--reminder {
-        border-color: rgba(154, 111, 26, 0.2);
-        background: rgba(154, 111, 26, 0.07);
-        color: #7a5a1f;
-      }
-      .notice--reminder .notice__eyebrow {
-        color: #8a661f;
-      }
-      .muted {
-        color: var(--muted);
-        font-size: 14px;
-      }
-      .list {
-        display: grid;
-        gap: 12px;
-      }
-      .list-item, .card {
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 18px;
-        background: rgba(255, 255, 255, 0.92);
-      }
-      .list-item--interactive {
-        cursor: pointer;
-        transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
-      }
-      .list-item--interactive:hover {
-        border-color: var(--line-strong);
-        background: rgba(255, 255, 255, 0.98);
-      }
-      .list-item--interactive.is-active {
-        border-color: rgba(21, 111, 91, 0.5);
-        background: rgba(21, 111, 91, 0.08);
-        box-shadow: inset 3px 0 0 var(--accent);
-      }
-      .card {
-        display: grid;
-        gap: 16px;
-        align-content: start;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
-      }
-      .card-grid {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      }
-      .summary-grid {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-      .section-grid {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.95fr);
-      }
-      .section-grid--workspace {
-        grid-template-columns: minmax(280px, 0.92fr) minmax(0, 1.45fr);
-        align-items: stretch;
-      }
-      .sidebar-stack {
-        display: grid;
-        gap: 18px;
-        align-content: start;
-      }
-      .inline-actions {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      .toolbar {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        justify-content: space-between;
-        flex-wrap: wrap;
-      }
-      .toolbar-start {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .toolbar-end {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .toolbar-panel {
-        display: flex;
-        gap: 14px;
-        align-items: flex-start;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        padding: 16px 18px;
-        border: 1px solid rgba(21, 111, 91, 0.14);
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.84);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
-      }
-      .selection-actions {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .control-grid {
-        display: grid;
-        gap: 12px;
-        grid-template-columns: minmax(220px, 1.7fr) repeat(2, minmax(160px, 0.75fr));
-      }
-      .control-grid label {
-        gap: 6px;
-      }
-      .result-meta {
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 600;
-      }
-      .filter-meta {
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 600;
-      }
-      .selection-meta {
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 600;
-      }
-      .pagination {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        flex-wrap: wrap;
-        padding-top: 4px;
-      }
-      .pagination[hidden] {
-        display: none;
-      }
-      .pagination-buttons {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .table-shell {
-        display: grid;
-        gap: 16px;
-      }
-      .checkbox-cell {
-        width: 42px;
-      }
-      .checkbox-wrap {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .table {
-        width: 100%;
-        border-collapse: collapse;
-        table-layout: fixed;
-      }
-      .table th,
-      .table td {
-        text-align: left;
-        padding: 14px 10px;
-        border-bottom: 1px solid var(--line);
-        vertical-align: top;
-      }
-      .table th {
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-      }
-      .table tbody tr {
-        transition: background 140ms ease, box-shadow 140ms ease;
-      }
-      .table tbody tr:hover {
-        background: rgba(21, 111, 91, 0.04);
-      }
-      .table tbody tr.is-selected {
-        background: rgba(21, 111, 91, 0.1);
-        box-shadow: inset 3px 0 0 var(--accent);
-      }
-      .table tbody tr.is-selected:hover {
-        background: rgba(21, 111, 91, 0.14);
-      }
-      .table tbody tr.is-unread {
-        background: rgba(21, 111, 91, 0.035);
-      }
-      .table tbody tr.is-unread:hover {
-        background: rgba(21, 111, 91, 0.08);
-      }
-      .table tbody tr.is-selected {
-        background: rgba(21, 111, 91, 0.12);
-        box-shadow: inset 3px 0 0 var(--accent);
-      }
-      .table tbody tr.is-selected:hover {
-        background: rgba(21, 111, 91, 0.16);
-      }
-      .badge {
-        display: inline-flex;
-        align-items: center;
-        padding: 5px 9px;
-        border-radius: 999px;
-        border: 1px solid rgba(21, 111, 91, 0.14);
-        background: rgba(21, 111, 91, 0.08);
-        color: var(--accent-strong);
-        font-size: 12px;
-        line-height: 1.2;
-      }
-      .badge-row {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
-      }
-      .detail-grid {
-        display: grid;
-        gap: 18px;
-        grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
-      }
-      .detail-grid--mailbox {
-        grid-template-columns: minmax(280px, 330px) minmax(0, 1fr);
-      }
-      .detail-list {
-        display: grid;
-        gap: 12px;
-      }
-      .state-panel {
-        display: grid;
-        gap: 10px;
-        padding: 16px 18px;
-        border: 1px dashed rgba(201, 193, 177, 0.92);
-        border-radius: 10px;
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(249, 245, 237, 0.92) 100%);
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
-      }
-      .state-panel--compact {
-        padding: 14px 16px;
-        gap: 8px;
-      }
-      .state-panel--danger {
-        border-style: solid;
-        border-color: rgba(155, 44, 44, 0.18);
-        background: rgba(155, 44, 44, 0.04);
-      }
-      .state-panel__title {
-        margin: 0;
-        color: var(--text);
-        font-size: 15px;
-        font-weight: 700;
-        line-height: 1.4;
-      }
-      .state-panel__eyebrow {
-        margin: 0;
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 700;
-        line-height: 1.3;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-      .state-panel__body {
-        margin: 0;
-        color: var(--muted);
-        font-size: 14px;
-        line-height: 1.65;
-      }
-      .detail-item {
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        padding: 14px 16px;
-        background: linear-gradient(180deg, #ffffff 0%, #fbf8f1 100%);
-        display: grid;
-        gap: 6px;
-      }
-      .detail-item strong,
-      .detail-item code,
-      .detail-item .detail-value {
-        display: block;
-        color: var(--text);
-        overflow-wrap: anywhere;
-      }
-      .detail-label {
-        color: var(--muted);
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-      }
-      .detail-value {
-        font-weight: 600;
-        line-height: 1.55;
-      }
-      .detail-actions {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin-bottom: 4px;
-      }
-      .attachment-list {
-        display: grid;
-        gap: 12px;
-      }
-      .attachment-link {
-        display: inline-flex;
-        align-items: flex-start;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-      .attachment-link:hover {
-        text-decoration: none;
-      }
-      .attachment-name {
-        display: block;
-        color: var(--text);
-        font-weight: 700;
-      }
-      .attachment-meta {
-        color: var(--muted);
-        font-size: 13px;
-      }
-      .attachment-preview {
-        display: block;
-        max-width: 100%;
-        max-height: 220px;
-        margin-top: 12px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: #f8f5ee;
-      }
-      .mode-switch .secondary.is-active {
-        background: rgba(21, 111, 91, 0.08);
-        border-color: var(--accent);
-        color: var(--accent-strong);
-      }
-      .subject-link {
-        display: inline-flex;
-        align-items: flex-start;
-        margin: 0;
-      }
-      .subject-link:hover {
-        text-decoration: none;
-      }
-      .table-primary {
-        display: grid;
-        gap: 6px;
-      }
-      .address-chip {
-        display: inline-flex;
-        align-items: center;
-        max-width: 100%;
-        padding: 5px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(21, 111, 91, 0.12);
-        background: #f2f8f6;
-        color: var(--accent-strong);
-        font-weight: 600;
-        overflow-wrap: anywhere;
-      }
-      .subject-title,
-      .table-title {
-        color: var(--text);
-        font-size: 15px;
-        line-height: 1.45;
-      }
-      .subject-title.is-unread {
-        font-weight: 800;
-      }
-      .table-preview {
-        color: var(--muted);
-        font-size: 13px;
-        line-height: 1.55;
-      }
-      .sender-cell {
-        display: grid;
-        gap: 4px;
-      }
-      .sender-name {
-        color: var(--text);
-        font-weight: 600;
-      }
-      .sender-address {
-        color: var(--muted);
-        font-size: 13px;
-        overflow-wrap: anywhere;
-      }
-      .subdomain-meta {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        flex-wrap: wrap;
-      }
-      .workspace-card {
-        display: grid;
-        grid-template-rows: auto minmax(0, 1fr) auto;
-        gap: 10px;
-        min-height: 100%;
-      }
-      .workspace-card__header {
-        display: flex;
-        gap: 12px;
-        align-items: flex-start;
-        justify-content: space-between;
-        flex-wrap: wrap;
-        min-height: 68px;
-      }
-      .workspace-card__header .title-block {
-        min-height: 68px;
-        align-content: start;
-      }
-      .workspace-card__body {
-        min-height: 0;
-        display: grid;
-        align-content: start;
-        gap: 12px;
-      }
-      .workspace-card__footer {
-        min-height: 32px;
-        display: flex;
-        align-items: flex-end;
-      }
-      .workspace-list {
-        align-content: start;
-        gap: 10px;
-      }
-      .workspace-list .list-item {
-        padding: 14px 16px;
-      }
-      .workspace-table-wrap {
-        min-height: 0;
-      }
-      .workspace-table-wrap .table {
-        margin: 0;
-      }
-      .workspace-header-meta {
-        display: grid;
-        gap: 8px;
-        justify-items: end;
-      }
-      .workspace-header-meta .pagination {
-        padding-top: 0;
-      }
-      .confirm-backdrop {
-        position: fixed;
-        inset: 0;
-        z-index: 70;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        background: rgba(25, 28, 32, 0.32);
-        backdrop-filter: blur(6px);
-      }
-      .confirm-backdrop[hidden] {
-        display: none;
-      }
-      .confirm-dialog {
-        width: min(500px, 100%);
-        display: grid;
-        gap: 18px;
-        padding: 24px;
-        border: 1px solid rgba(155, 44, 44, 0.14);
-        border-radius: 10px;
-        background: rgba(255, 253, 250, 0.99);
-        box-shadow: 0 24px 60px rgba(27, 33, 35, 0.18);
-      }
-      .confirm-dialog__header {
-        display: grid;
-        gap: 6px;
-      }
-      .confirm-dialog__eyebrow {
-        color: var(--accent-strong);
-        font-size: 12px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-      }
-      .confirm-dialog__body {
-        display: grid;
-        gap: 12px;
-      }
-      .confirm-dialog__message {
-        color: var(--text);
-        font-size: 15px;
-        line-height: 1.65;
-      }
-      .confirm-dialog__detail {
-        padding: 13px 14px;
-        border: 1px solid rgba(155, 44, 44, 0.16);
-        border-radius: 10px;
-        background: rgba(155, 44, 44, 0.05);
-        color: #7b4338;
-        font-size: 13px;
-        line-height: 1.6;
-        white-space: pre-line;
-        overflow-wrap: anywhere;
-      }
-      .confirm-dialog__actions {
-        display: flex;
-        justify-content: flex-end;
-        gap: 10px;
-        flex-wrap: wrap;
-        padding-top: 6px;
-        border-top: 1px solid rgba(217, 210, 196, 0.8);
-      }
-      .email-body {
-        min-height: 420px;
-        padding: 20px 22px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: white;
-        white-space: pre-wrap;
-        overflow: auto;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        line-height: 1.72;
-        font-size: 14px;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
-      }
-      .email-body.is-empty-state {
-        min-height: 260px;
-        white-space: normal;
-        color: var(--muted);
-        background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 244, 236, 0.96) 100%);
-      }
-      .email-html-frame {
-        width: 100%;
-        min-height: 520px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: white;
-      }
-      .body-source {
-        margin-bottom: 10px;
-        font-size: 13px;
-      }
-      .empty {
-        padding: 22px 16px;
-        border: 1px dashed var(--line);
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.55);
-        color: var(--muted);
-        line-height: 1.6;
-      }
-      .empty--center {
-        text-align: center;
-      }
-      code {
-        font-family: Consolas, "SFMono-Regular", monospace;
-        font-size: 12px;
-        overflow-wrap: anywhere;
-      }
-      .mono {
-        font-family: Consolas, "SFMono-Regular", monospace;
-        font-size: 12px;
-        overflow-wrap: anywhere;
-      }
-      @media (max-width: 860px) {
-        .shell {
-          padding: 20px 14px 32px;
-        }
-        .header,
-        .content {
-          padding-left: 18px;
-          padding-right: 18px;
-        }
-        .summary-grid,
-        .section-grid {
-          grid-template-columns: 1fr;
-        }
-        .detail-grid,
-        .detail-grid--mailbox {
-          grid-template-columns: 1fr;
-        }
-        .control-grid {
-          grid-template-columns: 1fr;
-        }
-        .workspace-card__header,
-        .workspace-card__header .title-block,
-        .workspace-header-meta {
-          min-height: 0;
-        }
-        .workspace-header-meta {
-          justify-items: start;
-        }
-        .confirm-backdrop {
-          padding: 14px;
-        }
-        .table {
-          table-layout: auto;
-        }
-      }
-      @media (max-width: 640px) {
-        .metrics {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-        }
-        .card-grid {
-          grid-template-columns: 1fr;
-        }
-        .table th,
-        .table td {
-          padding-left: 6px;
-          padding-right: 6px;
-        }
-      }
-    </style>
-  </head>
-  <body>${body}</body>
-</html>`;
 }
 
 function renderLoginPage(appName: string, locale: Locale): string {
@@ -2693,6 +1838,8 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
                 <div class="metric"><strong>-</strong><span>${t(locale, "summaryAvailable")}</span></div>
                 <div class="metric"><strong>-</strong><span>${t(locale, "summaryAssigned")}</span></div>
                 <div class="metric"><strong>-</strong><span>${t(locale, "summaryDisabled")}</span></div>
+                <div class="metric"><strong>-</strong><span>${t(locale, "summaryVerified")}</span></div>
+                <div class="metric"><strong>-</strong><span>${t(locale, "summaryInvalid")}</span></div>
               </div>
             </div>
             <div class="card">
@@ -2727,17 +1874,36 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               </form>
             </div>
             <div class="card">
+              <h2>${t(locale, "createGroup")}</h2>
+              <form id="group-form">
+                <label>
+                  ${t(locale, "groupName")}
+                  <input type="text" name="name" maxlength="40" placeholder="${t(locale, "groupNamePlaceholder")}" required />
+                </label>
+                <label>
+                  ${t(locale, "groupColor")}
+                  <input type="color" name="color" value="#156f5b" />
+                </label>
+                <button type="submit">${t(locale, "createGroup")}</button>
+              </form>
+            </div>
+            <div class="card">
               <h2>${t(locale, "createMailbox")}</h2>
               <form id="mailbox-form">
                 <label>
                   ${t(locale, "selectedSubdomain")}
                   <select name="subdomainId" id="subdomain-select"></select>
                 </label>
+                <input type="hidden" name="candidateSubdomainId" id="candidate-subdomain-id" />
                 <div id="subdomain-target-state" class="state-panel state-panel--compact">
                   <p class="state-panel__eyebrow">${t(locale, "subdomainStrategyTitle")}</p>
                   <p class="state-panel__title">${t(locale, "subdomainStrategyEmptyTitle")}</p>
                   <p class="state-panel__body">${t(locale, "noSubdomainsYetAction")}</p>
                 </div>
+                <label>
+                  ${t(locale, "selectedGroup")}
+                  <select name="groupId" id="group-select"></select>
+                </label>
                 <label>
                   ${t(locale, "localPartMode")}
                   <select name="localPartMode" id="local-part-mode">
@@ -2778,7 +1944,10 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
                 </div>
                 <div class="workspace-header-meta">
                   <span id="subdomain-page-indicator" class="result-meta">${t(locale, "pageIndicator", { current: "1", total: "1" })}</span>
-                  <button id="delete-selected-subdomain-button" class="secondary" type="button">${t(locale, "deleteSelectedDomain")}</button>
+                  <div class="inline-actions">
+                    <button id="verify-all-subdomains-button" class="secondary" type="button">${t(locale, "verifyAllSubdomains")}</button>
+                    <button id="delete-selected-subdomain-button" class="secondary" type="button">${t(locale, "deleteSelectedDomain")}</button>
+                  </div>
                 </div>
               </div>
               <div class="workspace-card__body">
@@ -2811,13 +1980,45 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               <div class="workspace-card__body">
                 <div class="toolbar">
                   <span id="mailbox-filter-meta" class="filter-meta">${t(locale, "mailboxListLeadAll")}</span>
+                  <label>
+                    ${t(locale, "groupFilterLabel")}
+                    <select id="group-filter-select"></select>
+                  </label>
                 </div>
+                <div id="mailbox-editor-empty" class="state-panel state-panel--compact">
+                  <p class="state-panel__eyebrow">${t(locale, "editSelectedMailbox")}</p>
+                  <p class="state-panel__body">${t(locale, "selectedMailboxEditorEmpty")}</p>
+                </div>
+                <form id="mailbox-editor-form" class="toolbar-panel" hidden>
+                  <div class="title-block">
+                    <h2>${t(locale, "editSelectedMailbox")}</h2>
+                    <p id="mailbox-editor-address">${t(locale, "selectedMailboxEditorHint")}</p>
+                  </div>
+                  <label>
+                    ${t(locale, "selectedGroup")}
+                    <select name="groupId" id="mailbox-editor-group-select"></select>
+                  </label>
+                  <label>
+                    ${t(locale, "status")}
+                    <select name="status" id="mailbox-editor-status-select">
+                      <option value="active">${t(locale, "statusActive")}</option>
+                      <option value="paused">${t(locale, "statusPaused")}</option>
+                      <option value="archived">${t(locale, "statusArchived")}</option>
+                    </select>
+                  </label>
+                  <label>
+                    ${t(locale, "note")}
+                    <textarea name="note" id="mailbox-editor-note" maxlength="140" placeholder="${t(locale, "notePlaceholder")}"></textarea>
+                  </label>
+                  <button type="submit">${t(locale, "saveMailboxChanges")}</button>
+                </form>
                 <div class="workspace-table-wrap">
                   <table class="table">
                     <thead>
                       <tr>
                         <th>${t(locale, "address")}</th>
                         <th>${t(locale, "status")}</th>
+                        <th>${t(locale, "groupColumn")}</th>
                         <th>${t(locale, "note")}</th>
                         <th>${t(locale, "createdAt")}</th>
                       </tr>
@@ -2834,6 +2035,16 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
                 </div>
               </div>
             </div>
+          </div>
+          <div class="card">
+            <div class="row row--start">
+              <div class="title-block">
+                <h2>${t(locale, "groupManagement")}</h2>
+                <p class="muted">${t(locale, "groupManagementBody")}</p>
+              </div>
+            </div>
+            <div id="group-management-list" class="list"></div>
+            <div id="group-management-empty" class="empty empty--center" hidden>${t(locale, "noGroupsYet")}</div>
           </div>
         </div>
       </section>
@@ -2861,14 +2072,35 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         summaryAvailable: ${JSON.stringify(t(locale, "summaryAvailable"))},
         summaryAssigned: ${JSON.stringify(t(locale, "summaryAssigned"))},
         summaryDisabled: ${JSON.stringify(t(locale, "summaryDisabled"))},
+        summaryVerified: ${JSON.stringify(t(locale, "summaryVerified"))},
+        summaryInvalid: ${JSON.stringify(t(locale, "summaryInvalid"))},
         mailboxes: ${JSON.stringify(t(locale, "mailboxes"))},
         activeMailboxes: ${JSON.stringify(t(locale, "activeMailboxes"))},
         summaryPaused: ${JSON.stringify(t(locale, "summaryPaused"))},
         generateSuccess: ${JSON.stringify(t(locale, "generateSuccess", { count: "{count}" }))},
         mailboxCreated: ${JSON.stringify(t(locale, "mailboxCreated", { address: "{address}" }))},
+        mailboxRestored: ${JSON.stringify(t(locale, "mailboxRestored", { address: "{address}" }))},
+        mailboxUpdatedSuccess: ${JSON.stringify(t(locale, "mailboxUpdatedSuccess", { address: "{address}" }))},
+        mailboxStatusUpdatedSuccess: ${JSON.stringify(t(locale, "mailboxStatusUpdatedSuccess", { address: "{address}" }))},
+        groupCreatedSuccess: ${JSON.stringify(t(locale, "groupCreatedSuccess", { name: "{name}" }))},
+        groupUpdatedSuccess: ${JSON.stringify(t(locale, "groupUpdatedSuccess", { name: "{name}" }))},
+        groupDeletedSuccess: ${JSON.stringify(t(locale, "groupDeletedSuccess", { name: "{name}" }))},
+        groupName: ${JSON.stringify(t(locale, "groupName"))},
+        groupColor: ${JSON.stringify(t(locale, "groupColor"))},
+        saveGroup: ${JSON.stringify(t(locale, "saveGroup"))},
+        deleteGroup: ${JSON.stringify(t(locale, "deleteGroup"))},
+        noGroupsYet: ${JSON.stringify(t(locale, "noGroupsYet"))},
+        groupNotEmpty: ${JSON.stringify(t(locale, "groupNotEmpty"))},
+        invalidGroupColor: ${JSON.stringify(t(locale, "invalidGroupColor"))},
         noSubdomainAvailable: ${JSON.stringify(t(locale, "noSubdomainAvailable"))},
         noSuchSubdomain: ${JSON.stringify(t(locale, "noSuchSubdomain"))},
         noNote: ${JSON.stringify(t(locale, "noNote"))},
+        noGroupOption: ${JSON.stringify(t(locale, "noGroupOption"))},
+        allGroups: ${JSON.stringify(t(locale, "allGroups"))},
+        invalidGroupName: ${JSON.stringify(t(locale, "invalidGroupName"))},
+        selectedMailboxEditorEmpty: ${JSON.stringify(t(locale, "selectedMailboxEditorEmpty"))},
+        selectedMailboxEditorHint: ${JSON.stringify(t(locale, "selectedMailboxEditorHint"))},
+        noteTooLong: ${JSON.stringify(t(locale, "noteTooLong"))},
         deleteEmptyMailboxesSuccess: ${JSON.stringify(t(locale, "deleteEmptyMailboxesSuccess", { count: "{count}" }))},
         deleteAllSubdomainsSuccess: ${JSON.stringify(t(locale, "deleteAllSubdomainsSuccess", { count: "{count}" }))},
         deleteSelectedDomainSuccess: ${JSON.stringify(t(locale, "deleteSelectedDomainSuccess", { domain: "{domain}" }))},
@@ -2916,6 +2148,12 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         subdomainStrategyEmptyEyebrow: ${JSON.stringify(t(locale, "subdomainStrategyEmptyEyebrow"))},
         subdomainStrategyEmptyTitle: ${JSON.stringify(t(locale, "subdomainStrategyEmptyTitle"))},
         autoCandidate: ${JSON.stringify(t(locale, "autoCandidate"))},
+        subdomainVerificationUpdated: ${JSON.stringify(t(locale, "subdomainVerificationUpdated"))},
+        verifySubdomainNow: ${JSON.stringify(t(locale, "verifySubdomainNow"))},
+        subdomainVerificationChecked: ${JSON.stringify(
+          t(locale, "subdomainVerificationChecked", { domain: "{domain}", status: "{status}", detail: "{detail}" })
+        )},
+        subdomainVerificationBatchChecked: ${JSON.stringify(t(locale, "subdomainVerificationBatchChecked", { count: "{count}" }))},
         noMailboxesYet: ${JSON.stringify(t(locale, "noMailboxesYet"))},
         noSubdomainsYet: ${JSON.stringify(t(locale, "noSubdomainsYet"))},
         noMailboxesYetAll: ${JSON.stringify(t(locale, "noMailboxesYetAll"))},
@@ -2939,6 +2177,11 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           assigned: ${JSON.stringify(t(locale, "statusAssigned"))},
           disabled: ${JSON.stringify(t(locale, "statusDisabled"))},
           reserved: ${JSON.stringify(t(locale, "statusReserved"))}
+        },
+        verificationStatus: {
+          verified: ${JSON.stringify(t(locale, "verificationStatusVerified"))},
+          unverified: ${JSON.stringify(t(locale, "verificationStatusUnverified"))},
+          invalid: ${JSON.stringify(t(locale, "verificationStatusInvalid"))}
         }
       };
 
@@ -2963,10 +2206,23 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       const logoutButton = document.getElementById("logout-button");
       const refreshButton = document.getElementById("refresh-button");
       const deleteSelectedSubdomainButton = document.getElementById("delete-selected-subdomain-button");
+      const verifyAllSubdomainsButton = document.getElementById("verify-all-subdomains-button");
       const deleteSelectedMailboxButton = document.getElementById("delete-selected-mailbox-button");
       const subdomainForm = document.getElementById("subdomain-form");
+      const groupForm = document.getElementById("group-form");
+      const groupManagementList = document.getElementById("group-management-list");
+      const groupManagementEmpty = document.getElementById("group-management-empty");
       const mailboxForm = document.getElementById("mailbox-form");
       const subdomainSelect = document.getElementById("subdomain-select");
+      const candidateSubdomainInput = document.getElementById("candidate-subdomain-id");
+      const groupSelect = document.getElementById("group-select");
+      const groupFilterSelect = document.getElementById("group-filter-select");
+      const mailboxEditorEmpty = document.getElementById("mailbox-editor-empty");
+      const mailboxEditorForm = document.getElementById("mailbox-editor-form");
+      const mailboxEditorAddress = document.getElementById("mailbox-editor-address");
+      const mailboxEditorGroupSelect = document.getElementById("mailbox-editor-group-select");
+      const mailboxEditorStatusSelect = document.getElementById("mailbox-editor-status-select");
+      const mailboxEditorNote = document.getElementById("mailbox-editor-note");
       const localPartMode = document.getElementById("local-part-mode");
       const localPartInput = document.getElementById("local-part-input");
       const deleteEmptyMailboxesButton = document.getElementById("delete-empty-mailboxes-button");
@@ -2986,7 +2242,10 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       const LAST_SELECTED_SUBDOMAIN_STORAGE_KEY = "pmp:last-selected-subdomain";
       let allMailboxes = [];
       let allSubdomains = [];
+      let allGroups = [];
       let selectedSubdomainId = "all";
+      let selectedGroupId = "all";
+      let autoCandidateSubdomainId = "";
       let selectedMailboxId = "";
       let currentMailboxPage = 1;
       let currentSubdomainPage = 1;
@@ -3077,11 +2336,23 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       }
 
       function getAutoAssignedSubdomain() {
-        const availableSubdomains = allSubdomains
-          .filter((item) => item.status !== "disabled")
-          .slice()
-          .sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
-        return availableSubdomains[0] ?? null;
+        const availableSubdomains = allSubdomains.filter((item) => item.status !== "disabled" && item.verificationStatus !== "invalid");
+        if (availableSubdomains.length === 0) {
+          autoCandidateSubdomainId = "";
+          candidateSubdomainInput.value = "";
+          return null;
+        }
+
+        const existing = availableSubdomains.find((item) => item.id === autoCandidateSubdomainId);
+        if (existing) {
+          candidateSubdomainInput.value = existing.id;
+          return existing;
+        }
+
+        const next = availableSubdomains[Math.floor(Math.random() * availableSubdomains.length)];
+        autoCandidateSubdomainId = next.id;
+        candidateSubdomainInput.value = next.id;
+        return next;
       }
 
       function getStoredSubdomainPreference() {
@@ -3167,10 +2438,15 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       }
 
       function getFilteredMailboxes() {
-        if (selectedSubdomainId === "all") {
-          return allMailboxes;
-        }
-        return allMailboxes.filter((item) => item.subdomainId === selectedSubdomainId);
+        return allMailboxes.filter((item) => {
+          if (selectedSubdomainId !== "all" && item.subdomainId !== selectedSubdomainId) {
+            return false;
+          }
+          if (selectedGroupId !== "all" && (item.groupId || "") !== selectedGroupId) {
+            return false;
+          }
+          return true;
+        });
       }
 
       function getSelectedMailbox() {
@@ -3220,6 +2496,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
             : text.noMailboxesYetAll;
           mailboxPagination.hidden = true;
           mailboxPageIndicator.textContent = formatPageIndicator(1, 1);
+          renderMailboxEditor();
           return;
         }
 
@@ -3232,6 +2509,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               '</a>' +
             '</td>' +
             '<td><span class="badge">' + (text.status[item.status] || item.status) + '</span></td>' +
+            '<td><span class="badge">' + escapeHtml(item.groupName || text.noGroupOption) + '</span></td>' +
             '<td><span class="table-preview">' + escapeHtml(item.note || text.noNote) + '</span></td>' +
             '<td><span class="mono">' + formatDate(item.createdAt) + '</span></td>' +
           '</tr>'
@@ -3242,6 +2520,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         mailboxPrevButton.disabled = paginationState.currentPage <= 1;
         mailboxNextButton.disabled = paginationState.currentPage >= paginationState.totalPages;
         mailboxPagination.hidden = filteredMailboxes.length <= MAILBOX_PAGE_SIZE;
+        renderMailboxEditor();
       }
 
       function renderSubdomainList() {
@@ -3269,6 +2548,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               '<span class="address-chip">' + escapeHtml(item.fullDomain) + '</span>' +
               '<div class="badge-row">' +
                 '<span class="badge">' + (text.status[item.status] || item.status) + '</span>' +
+                '<span class="badge">' + (text.verificationStatus[item.verificationStatus] || item.verificationStatus) + '</span>' +
                 (autoAssignedSubdomain && autoAssignedSubdomain.id === item.id
                   ? '<span class="badge">' + escapeHtml(text.autoCandidate) + '</span>'
                   : '') +
@@ -3278,6 +2558,16 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               '<p class="muted">' + text.mailboxCountLabel + '</p>' +
               '<strong>' + (item.mailboxCount || 0) + '</strong>' +
             '</div>' +
+            '<select class="subdomain-verification-select" data-verification-subdomain-id="' + escapeHtml(item.id) + '">' +
+              ['verified', 'unverified', 'invalid'].map((status) => (
+                '<option value="' + status + '"' + (item.verificationStatus === status ? ' selected' : '') + '>' +
+                  escapeHtml(text.verificationStatus[status] || status) +
+                '</option>'
+              )).join("") +
+            '</select>' +
+            '<button class="secondary subdomain-verify-button" type="button" data-verify-subdomain-id="' + escapeHtml(item.id) + '">' +
+              escapeHtml(text.verifySubdomainNow) +
+            '</button>' +
           '</div>'
         )).join("");
 
@@ -3299,9 +2589,9 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         subdomainSelect.innerHTML = [
           '<option value="' + AUTO_SUBDOMAIN_VALUE + '"' + (preferredSubdomainId === AUTO_SUBDOMAIN_VALUE ? ' selected' : '') + '>' +
             escapeHtml(text.randomSubdomainOption) +
-          '</option>',
+            '</option>',
           ...allSubdomains
-            .filter((item) => item.status !== "disabled")
+            .filter((item) => item.status !== "disabled" && item.verificationStatus !== "invalid")
             .map((item) => (
               '<option value="' + item.id + '"' + (item.id === preferredSubdomainId ? ' selected' : '') + '>' + escapeHtml(item.fullDomain) + ' (' + (item.mailboxCount || 0) + ')</option>'
             ))
@@ -3309,6 +2599,88 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
 
         renderSubdomainStrategyState();
         syncSelectionState();
+      }
+
+      function renderGroupManagement() {
+        groupManagementEmpty.hidden = allGroups.length > 0;
+        if (allGroups.length === 0) {
+          groupManagementList.innerHTML = "";
+          return;
+        }
+
+        groupManagementList.innerHTML = allGroups.map((group) => (
+          '<form class="toolbar-panel group-editor" data-group-id="' + escapeHtml(group.id) + '">' +
+            '<label>' +
+              '<span>' + escapeHtml(text.groupName) + '</span>' +
+              '<input type="text" name="name" maxlength="40" value="' + escapeHtml(group.name) + '" required />' +
+            '</label>' +
+            '<label>' +
+              '<span>' + escapeHtml(text.groupColor) + '</span>' +
+              '<input type="color" name="color" value="' + escapeHtml(group.color || '#156f5b') + '" />' +
+            '</label>' +
+            '<span class="badge">' + escapeHtml(String(group.mailboxCount || 0)) + ' ' + escapeHtml(text.mailboxCountLabel) + '</span>' +
+            '<div class="inline-actions">' +
+              '<button type="submit">' + escapeHtml(text.saveGroup) + '</button>' +
+              '<button class="secondary" type="button" data-delete-group-id="' + escapeHtml(group.id) + '" ' + ((group.mailboxCount || 0) > 0 ? 'disabled' : '') + '>' +
+                escapeHtml(text.deleteGroup) +
+              '</button>' +
+            '</div>' +
+          '</form>'
+        )).join("");
+      }
+
+      function renderGroupControls() {
+        const currentGroupValue = groupSelect.value || "";
+        const groupOptions = [
+          '<option value="">' + escapeHtml(text.noGroupOption) + '</option>',
+          ...allGroups.map((group) => (
+            '<option value="' + escapeHtml(group.id) + '"' + (group.id === currentGroupValue ? ' selected' : '') + '>' +
+              escapeHtml(group.name) +
+            '</option>'
+          ))
+        ].join("");
+        groupSelect.innerHTML = groupOptions;
+
+        const selectedMailbox = getSelectedMailbox();
+        const editorGroupValue = selectedMailbox?.groupId || "";
+        mailboxEditorGroupSelect.innerHTML = [
+          '<option value="">' + escapeHtml(text.noGroupOption) + '</option>',
+          ...allGroups.map((group) => (
+            '<option value="' + escapeHtml(group.id) + '"' + (group.id === editorGroupValue ? ' selected' : '') + '>' +
+              escapeHtml(group.name) +
+            '</option>'
+          ))
+        ].join("");
+
+        const currentFilterValue = selectedGroupId;
+        groupFilterSelect.innerHTML = [
+          '<option value="all">' + escapeHtml(text.allGroups) + '</option>',
+          '<option value="">' + escapeHtml(text.noGroupOption) + '</option>',
+          ...allGroups.map((group) => (
+            '<option value="' + escapeHtml(group.id) + '">' + escapeHtml(group.name) + ' (' + (group.mailboxCount || 0) + ')</option>'
+          ))
+        ].join("");
+        groupFilterSelect.value = currentFilterValue;
+      }
+
+      function renderMailboxEditor() {
+        const mailbox = getSelectedMailbox();
+        if (!mailbox) {
+          mailboxEditorEmpty.hidden = false;
+          mailboxEditorForm.hidden = true;
+          mailboxEditorAddress.textContent = text.selectedMailboxEditorHint;
+          mailboxEditorNote.value = "";
+          mailboxEditorStatusSelect.value = "active";
+          renderGroupControls();
+          return;
+        }
+
+        mailboxEditorEmpty.hidden = true;
+        mailboxEditorForm.hidden = false;
+        mailboxEditorAddress.textContent = mailbox.fullAddress + " | " + text.selectedMailboxEditorHint;
+        mailboxEditorNote.value = mailbox.note || "";
+        mailboxEditorStatusSelect.value = mailbox.status || "active";
+        renderGroupControls();
       }
 
       function setLocalPartMode() {
@@ -3405,6 +2777,9 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
 
       localPartMode.addEventListener("change", setLocalPartMode);
       subdomainSelect.addEventListener("change", () => {
+        if (subdomainSelect.value === AUTO_SUBDOMAIN_VALUE) {
+          autoCandidateSubdomainId = "";
+        }
         renderSubdomainStrategyState();
       });
       setLocalPartMode();
@@ -3444,6 +2819,72 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         currentMailboxPage = 1;
         renderSubdomainList();
         renderMailboxTable();
+      });
+
+      groupFilterSelect.addEventListener("change", () => {
+        selectedGroupId = groupFilterSelect.value;
+        currentMailboxPage = 1;
+        renderMailboxTable();
+      });
+
+      mailboxEditorForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearMessage();
+        const mailbox = getSelectedMailbox();
+        if (!mailbox) {
+          showMessage("reminder", text.selectedMailboxEditorEmpty);
+          return;
+        }
+
+        const formData = new FormData(mailboxEditorForm);
+        const note = String(formData.get("note") ?? "").trim();
+        if (note.length > 140) {
+          showMessage("reminder", text.noteTooLong);
+          return;
+        }
+
+        const metadataResponse = await fetch(
+          "/api/mailboxes/" + encodeURIComponent(mailbox.id) + "/metadata?lang=" + encodeURIComponent(currentLang),
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-app-language": currentLang
+            },
+            body: JSON.stringify({
+              note,
+              groupId: formData.get("groupId")
+            })
+          }
+        );
+        const metadataPayload = await metadataResponse.json();
+        if (!metadataResponse.ok) {
+          showMessage("error", metadataPayload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        const statusResponse = await fetch(
+          "/api/mailboxes/" + encodeURIComponent(mailbox.id) + "/status?lang=" + encodeURIComponent(currentLang),
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-app-language": currentLang
+            },
+            body: JSON.stringify({
+              status: formData.get("status")
+            })
+          }
+        );
+        const statusPayload = await statusResponse.json();
+        if (!statusResponse.ok) {
+          showMessage("error", statusPayload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        const payload = metadataPayload;
+        showMessage("success", text.mailboxUpdatedSuccess.replace("{address}", payload.mailbox.fullAddress || mailbox.fullAddress));
+        await loadData();
       });
 
       deleteSelectedSubdomainButton.addEventListener("click", () => {
@@ -3553,6 +2994,37 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         await loadData();
       });
 
+      groupForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearMessage();
+        const formData = new FormData(groupForm);
+        const name = String(formData.get("name") ?? "").trim();
+        if (!name || name.length > 40) {
+          showMessage("reminder", text.invalidGroupName);
+          return;
+        }
+
+        const response = await fetch("/api/mailbox-groups?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-app-language": currentLang
+          },
+          body: JSON.stringify({
+            name,
+            color: formData.get("color")
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+        groupForm.reset();
+        showMessage("success", text.groupCreatedSuccess.replace("{name}", payload.group.name));
+        await loadData();
+      });
+
       mailboxForm.addEventListener("submit", async (event) => {
         event.preventDefault();
         clearMessage();
@@ -3565,6 +3037,8 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           },
           body: JSON.stringify({
             subdomainId: formData.get("subdomainId") === AUTO_SUBDOMAIN_VALUE ? "" : formData.get("subdomainId"),
+            candidateSubdomainId: formData.get("candidateSubdomainId"),
+            groupId: formData.get("groupId"),
             localPartMode: formData.get("localPartMode"),
             localPart: formData.get("localPart"),
             note: formData.get("note")
@@ -3576,35 +3050,45 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           return;
         }
         setStoredSubdomainPreference(String(formData.get("subdomainId") ?? AUTO_SUBDOMAIN_VALUE));
-        showMessage("success", text.mailboxCreated.replace("{address}", payload.mailbox.fullAddress));
+        showMessage(
+          "success",
+          (payload.restored ? text.mailboxRestored : text.mailboxCreated).replace("{address}", payload.mailbox.fullAddress)
+        );
         mailboxForm.reset();
         setLocalPartMode();
+        autoCandidateSubdomainId = "";
         await loadData();
       });
 
       async function loadData() {
-        const [mailboxesResponse, subdomainsResponse] = await Promise.all([
+        const [mailboxesResponse, subdomainsResponse, groupsResponse] = await Promise.all([
           fetch("/api/mailboxes?lang=" + encodeURIComponent(currentLang), {
             headers: { "x-app-language": currentLang }
           }),
           fetch("/api/subdomains?lang=" + encodeURIComponent(currentLang), {
             headers: { "x-app-language": currentLang }
+          }),
+          fetch("/api/mailbox-groups?lang=" + encodeURIComponent(currentLang), {
+            headers: { "x-app-language": currentLang }
           })
         ]);
 
-        if (mailboxesResponse.status === 401 || subdomainsResponse.status === 401) {
+        if (mailboxesResponse.status === 401 || subdomainsResponse.status === 401 || groupsResponse.status === 401) {
           window.location.href = "/login?lang=" + encodeURIComponent(currentLang);
           return;
         }
 
         const mailboxesPayload = await mailboxesResponse.json();
         const subdomainsPayload = await subdomainsResponse.json();
+        const groupsPayload = await groupsResponse.json();
 
         subdomainSummary.innerHTML = [
           [text.summaryTotal, subdomainsPayload.summary.total],
           [text.summaryAvailable, subdomainsPayload.summary.available],
           [text.summaryAssigned, subdomainsPayload.summary.assigned],
-          [text.summaryDisabled, subdomainsPayload.summary.disabled]
+          [text.summaryDisabled, subdomainsPayload.summary.disabled],
+          [text.summaryVerified, subdomainsPayload.summary.verified],
+          [text.summaryInvalid, subdomainsPayload.summary.invalid]
         ].map(([label, value]) => (
           '<div class="metric"><strong>' + value + '</strong><span>' + label + '</span></div>'
         )).join("");
@@ -3619,13 +3103,19 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
 
         allMailboxes = Array.isArray(mailboxesPayload.items) ? mailboxesPayload.items : [];
         allSubdomains = Array.isArray(subdomainsPayload.items) ? subdomainsPayload.items : [];
+        allGroups = Array.isArray(groupsPayload.items) ? groupsPayload.items : [];
 
         if (selectedSubdomainId !== "all" && !allSubdomains.some((item) => item.id === selectedSubdomainId)) {
           selectedSubdomainId = "all";
         }
+        if (selectedGroupId !== "all" && selectedGroupId !== "" && !allGroups.some((item) => item.id === selectedGroupId)) {
+          selectedGroupId = "all";
+        }
 
         currentSubdomainPage = 1;
         currentMailboxPage = 1;
+        renderGroupControls();
+        renderGroupManagement();
         renderSubdomainList();
         renderMailboxTable();
       }
@@ -3633,6 +3123,9 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       subdomainList.addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        if (target.closest("select") || target.closest("button")) {
           return;
         }
         const item = target.closest("[data-subdomain-id]");
@@ -3647,6 +3140,196 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
         currentMailboxPage = 1;
         renderSubdomainList();
         renderMailboxTable();
+      });
+
+      subdomainList.addEventListener("change", async (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLSelectElement) || !target.classList.contains("subdomain-verification-select")) {
+          return;
+        }
+        clearMessage();
+        const subdomainId = target.getAttribute("data-verification-subdomain-id");
+        const verificationStatus = target.value;
+        if (!subdomainId) {
+          return;
+        }
+
+        const response = await fetch(
+          "/api/subdomains/" + encodeURIComponent(subdomainId) + "/verification?lang=" + encodeURIComponent(currentLang),
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-app-language": currentLang
+            },
+            body: JSON.stringify({ verificationStatus })
+          }
+        );
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          await loadData();
+          return;
+        }
+
+        showMessage("success", text.subdomainVerificationUpdated);
+        autoCandidateSubdomainId = "";
+        await loadData();
+      });
+
+      subdomainList.addEventListener("click", async (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const button = target.closest("[data-verify-subdomain-id]");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+        clearMessage();
+        const subdomainId = button.getAttribute("data-verify-subdomain-id");
+        if (!subdomainId) {
+          return;
+        }
+
+        button.disabled = true;
+        const response = await fetch(
+          "/api/subdomains/" + encodeURIComponent(subdomainId) + "/verify?lang=" + encodeURIComponent(currentLang),
+          {
+            method: "POST",
+            headers: {
+              "x-app-language": currentLang
+            }
+          }
+        );
+        const payload = await response.json();
+        button.disabled = false;
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        const statusText = text.verificationStatus[payload.verificationStatus] || payload.verificationStatus;
+        showMessage(
+          payload.verificationStatus === "verified" ? "success" : "reminder",
+          text.subdomainVerificationChecked
+            .replace("{domain}", payload.fullDomain)
+            .replace("{status}", statusText)
+            .replace("{detail}", payload.detail || "")
+        );
+        autoCandidateSubdomainId = "";
+        await loadData();
+      });
+
+      verifyAllSubdomainsButton.addEventListener("click", async () => {
+        clearMessage();
+        verifyAllSubdomainsButton.disabled = true;
+        const response = await fetch("/api/subdomains/verify-all?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "x-app-language": currentLang
+          }
+        });
+        const payload = await response.json();
+        verifyAllSubdomainsButton.disabled = false;
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        showMessage("success", text.subdomainVerificationBatchChecked.replace("{count}", String(payload.checkedCount || 0)));
+        autoCandidateSubdomainId = "";
+        await loadData();
+      });
+
+      groupManagementList.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearMessage();
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) {
+          return;
+        }
+
+        const groupId = form.getAttribute("data-group-id");
+        const formData = new FormData(form);
+        const name = String(formData.get("name") ?? "").trim();
+        const color = String(formData.get("color") ?? "").trim();
+        if (!groupId) {
+          return;
+        }
+        if (!name || name.length > 40) {
+          showMessage("reminder", text.invalidGroupName);
+          return;
+        }
+        if (!/^#[0-9a-fA-F]{6}$/.test(color)) {
+          showMessage("reminder", text.invalidGroupColor);
+          return;
+        }
+
+        const response = await fetch("/api/mailbox-groups/" + encodeURIComponent(groupId) + "?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-app-language": currentLang
+          },
+          body: JSON.stringify({ name, color })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        showMessage("success", text.groupUpdatedSuccess.replace("{name}", payload.group.name));
+        await loadData();
+      });
+
+      groupManagementList.addEventListener("click", async (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const button = target.closest("[data-delete-group-id]");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+
+        clearMessage();
+        const groupId = button.getAttribute("data-delete-group-id");
+        const group = allGroups.find((item) => item.id === groupId);
+        if (!groupId || !group) {
+          return;
+        }
+        if ((group.mailboxCount || 0) > 0) {
+          showMessage("reminder", text.groupNotEmpty);
+          return;
+        }
+
+        const confirmed = await openConfirmDialog({
+          eyebrow: text.confirmDialogDeleteTitle,
+          title: text.deleteGroup,
+          message: text.deleteGroup + ": " + group.name + "?",
+          detail: text.confirmDialogIrreversible,
+          confirmLabel: text.confirmDialogDeleteAction
+        });
+        if (!confirmed) {
+          return;
+        }
+
+        const response = await fetch("/api/mailbox-groups/" + encodeURIComponent(groupId) + "/delete?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "x-app-language": currentLang
+          }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        showMessage("success", text.groupDeletedSuccess.replace("{name}", payload.group.name || group.name));
+        await loadData();
       });
 
       window.addEventListener("resize", () => {
@@ -3716,6 +3399,19 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
               <div class="card">
                 <h2>${t(locale, "mailboxInfo")}</h2>
                 <div class="list" id="mailbox-overview"></div>
+              </div>
+              <div class="card">
+                <h2>${t(locale, "editNote")}</h2>
+                <form id="note-form">
+                  <label>
+                    ${t(locale, "note")}
+                    <textarea id="note-input" name="note" maxlength="140" placeholder="${t(locale, "notePlaceholder")}"></textarea>
+                  </label>
+                  <div class="toolbar">
+                    <span class="muted">${t(locale, "noteHelp")}</span>
+                    <button type="submit">${t(locale, "saveNote")}</button>
+                  </div>
+                </form>
               </div>
               <div class="card">
                 <div class="row row--start">
@@ -3817,6 +3513,8 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         mailboxNotFound: ${JSON.stringify(t(locale, "mailboxNotFound"))},
         mailboxUnavailableBody: ${JSON.stringify(t(locale, "mailboxUnavailableBody"))},
         noNote: ${JSON.stringify(t(locale, "noNote"))},
+        noteUpdatedSuccess: ${JSON.stringify(t(locale, "noteUpdatedSuccess"))},
+        noteTooLong: ${JSON.stringify(t(locale, "noteTooLong"))},
         noSubject: ${JSON.stringify(t(locale, "noSubject"))},
         inboxEmpty: ${JSON.stringify(t(locale, "inboxEmpty"))},
         inboxEmptyTitle: ${JSON.stringify(t(locale, "inboxEmptyTitle"))},
@@ -3857,6 +3555,8 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         retentionDeleteAfterDays: ${JSON.stringify(t(locale, "retentionDeleteAfterDays", { days: "{days}" }))},
         address: ${JSON.stringify(t(locale, "address"))},
         note: ${JSON.stringify(t(locale, "note"))},
+        selectedGroup: ${JSON.stringify(t(locale, "selectedGroup"))},
+        noGroupOption: ${JSON.stringify(t(locale, "noGroupOption"))},
         createdAt: ${JSON.stringify(t(locale, "createdAt"))},
         status: ${JSON.stringify(t(locale, "status"))},
         emailRead: ${JSON.stringify(t(locale, "emailRead"))},
@@ -3889,6 +3589,8 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
       const mailboxState = document.getElementById("mailbox-state");
       const detailMetrics = document.getElementById("detail-metrics");
       const mailboxOverview = document.getElementById("mailbox-overview");
+      const noteForm = document.getElementById("note-form");
+      const noteInput = document.getElementById("note-input");
       const inboxSummary = document.getElementById("inbox-summary");
       const inboxSummaryLead = document.getElementById("inbox-summary-lead");
       const emailListLead = document.getElementById("email-list-lead");
@@ -3907,6 +3609,7 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
       const refreshButton = document.getElementById("refresh-button");
       const logoutButton = document.getElementById("logout-button");
       let mailboxEmails = [];
+      let currentMailboxNote = "";
       let selectedEmailIds = new Set();
       let pendingConfirmResolver = null;
 
@@ -4184,6 +3887,35 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         loadMailboxDetail();
       });
 
+      noteForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearMessage();
+        const note = String(noteInput.value || "").trim();
+        if (note.length > 140) {
+          showMessage("reminder", text.noteTooLong);
+          return;
+        }
+
+        const response = await fetch("/api/mailboxes/" + encodeURIComponent(mailboxId) + "/note?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-app-language": currentLang
+          },
+          body: JSON.stringify({ note })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        currentMailboxNote = payload.mailbox.note || "";
+        noteInput.value = currentMailboxNote;
+        showMessage("success", text.noteUpdatedSuccess);
+        await loadMailboxDetail();
+      });
+
       selectVisibleButton.addEventListener("click", () => {
         const filteredEmails = getFilteredEmails();
         for (const email of filteredEmails) {
@@ -4282,6 +4014,9 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
           inboxSummary.innerHTML = renderStatePanel(text.mailboxNotFound, text.mailboxUnavailableBody, "danger");
           inboxSummaryLead.textContent = text.mailboxUnavailableBody;
           emailListLead.textContent = text.mailboxUnavailableBody;
+          noteInput.value = "";
+          noteInput.disabled = true;
+          noteForm.querySelector("button").disabled = true;
           emailResultsMeta.textContent = formatResultsSummary(0, 0);
           mailboxEmails = [];
           selectedEmailIds = new Set();
@@ -4307,6 +4042,10 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         const mailbox = mailboxPayload.mailbox;
         clearMailboxState();
         addressEl.textContent = mailbox.fullAddress;
+        currentMailboxNote = mailbox.note || "";
+        noteInput.value = currentMailboxNote;
+        noteInput.disabled = false;
+        noteForm.querySelector("button").disabled = false;
 
         detailMetrics.innerHTML = [
           [text.totalEmails, mailbox.totalEmailCount],
@@ -4319,6 +4058,7 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
 
         mailboxOverview.innerHTML = [
           [text.address, mailbox.fullAddress],
+          [text.selectedGroup, mailbox.groupName || text.noGroupOption],
           [text.note, mailbox.note || text.noNote],
           [text.createdAt, formatDate(mailbox.createdAt)],
           [text.retentionPolicy, formatRetention(mailbox)]
@@ -4653,15 +4393,6 @@ function renderEmailDetailPage(
   );
 }
 
-async function parseJsonBody(request: Request): Promise<Record<string, unknown>> {
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    return {};
-  }
-
-  return (await request.json()) as Record<string, unknown>;
-}
-
 async function resolveBootstrapAdminPasswordHash(env: Env): Promise<string> {
   const configuredHash = env.BOOTSTRAP_ADMIN_PASSWORD_HASH?.trim();
   if (configuredHash) {
@@ -4718,6 +4449,273 @@ function isValidLocalPart(value: string): boolean {
   return /^[a-z0-9](?:[a-z0-9._-]{0,30}[a-z0-9])?$/.test(value);
 }
 
+function isPlaceholderDomain(value: string): boolean {
+  return ["example.com", "yourdomain.com", "localhost", "127.0.0.1"].includes(value.toLowerCase());
+}
+
+function resolveBaseDomain(request: Request, env: Env): string {
+  const configured = env.BASE_DOMAIN?.trim().toLowerCase();
+  if (configured && !isPlaceholderDomain(configured)) {
+    return configured;
+  }
+
+  const hostname = new URL(request.url).hostname.toLowerCase();
+  if (!hostname.endsWith(".workers.dev") && !isPlaceholderDomain(hostname)) {
+    return hostname;
+  }
+
+  return configured || "example.com";
+}
+
+function normalizeGroupColor(value: unknown): string | null {
+  const color = String(value ?? "").trim();
+  if (!color) {
+    return "#156f5b";
+  }
+  return /^#[0-9a-fA-F]{6}$/.test(color) ? color.toLowerCase() : null;
+}
+
+interface DnsMxAnswer {
+  data?: string;
+}
+
+interface DnsJsonResponse {
+  Status?: number;
+  Answer?: DnsMxAnswer[];
+}
+
+interface SubdomainDnsVerificationResult {
+  verificationStatus: "verified" | "unverified" | "invalid";
+  mxRecords: string[];
+  routingDetected: boolean;
+  apiChecked: boolean;
+  detailKey: TranslationKey;
+}
+
+interface CloudflareApiEnvelope<T> {
+  success?: boolean;
+  result?: T;
+}
+
+interface CloudflareEmailRoutingSettings {
+  enabled?: boolean;
+  tag?: string;
+  name?: string;
+  status?: string;
+}
+
+interface CloudflareEmailRoutingRule {
+  enabled?: boolean;
+  tag?: string;
+  name?: string;
+  matchers?: Array<{
+    type?: string;
+    field?: string;
+    value?: string;
+  }>;
+  actions?: Array<{
+    type?: string;
+    value?: string[];
+  }>;
+}
+
+interface CloudflareEmailRoutingCatchAll {
+  enabled?: boolean;
+  tag?: string;
+  name?: string;
+  matchers?: Array<{
+    type?: string;
+    field?: string;
+    value?: string;
+  }>;
+  actions?: Array<{
+    type?: string;
+    value?: string[];
+  }>;
+}
+
+async function fetchCloudflareApi<T>(env: Env, path: string): Promise<T | null> {
+  const token = env.CLOUDFLARE_API_TOKEN?.trim();
+  const zoneId = env.CLOUDFLARE_ZONE_ID?.trim();
+  if (!token || !zoneId) {
+    return null;
+  }
+
+  const response = await fetch(`https://api.cloudflare.com/client/v4/zones/${encodeURIComponent(zoneId)}${path}`, {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json"
+    }
+  });
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as CloudflareApiEnvelope<T>;
+  if (payload.success === false || payload.result === undefined) {
+    return null;
+  }
+
+  return payload.result;
+}
+
+function isCloudflareRoutingMx(record: string): boolean {
+  return /(^|\s)route\d+\.mx\.cloudflare\.net$/i.test(record);
+}
+
+function isEmailRoutingEnabled(settings: CloudflareEmailRoutingSettings | null): boolean {
+  if (!settings) {
+    return false;
+  }
+
+  const status = String(settings.status ?? "").toLowerCase();
+  return settings.enabled === true || status === "enabled" || status === "ready";
+}
+
+function ruleMentionsDomain(rule: CloudflareEmailRoutingRule | CloudflareEmailRoutingCatchAll, fullDomain: string): boolean {
+  const domain = fullDomain.toLowerCase();
+  return (rule.matchers ?? []).some((matcher) => {
+    const value = String(matcher.value ?? "").toLowerCase();
+    return value === domain || value.endsWith(`@${domain}`) || value.endsWith(`.${domain}`);
+  });
+}
+
+function isRuleEnabled(rule: CloudflareEmailRoutingRule | CloudflareEmailRoutingCatchAll | null): boolean {
+  if (!rule) {
+    return false;
+  }
+  return rule.enabled !== false;
+}
+
+async function detectCloudflareEmailRouting(env: Env, fullDomain: string): Promise<boolean | null> {
+  if (!env.CLOUDFLARE_API_TOKEN?.trim() || !env.CLOUDFLARE_ZONE_ID?.trim()) {
+    return null;
+  }
+
+  try {
+    const [settings, rules, catchAll] = await Promise.all([
+      fetchCloudflareApi<CloudflareEmailRoutingSettings>(env, "/email/routing"),
+      fetchCloudflareApi<CloudflareEmailRoutingRule[]>(env, "/email/routing/rules"),
+      fetchCloudflareApi<CloudflareEmailRoutingCatchAll>(env, "/email/routing/rules/catch_all")
+    ]);
+
+    if (settings && !isEmailRoutingEnabled(settings)) {
+      return false;
+    }
+
+    if (isRuleEnabled(catchAll)) {
+      return true;
+    }
+
+    const matchingRuleFound = (rules ?? []).some((rule) => isRuleEnabled(rule) && ruleMentionsDomain(rule, fullDomain));
+    if (matchingRuleFound) {
+      return true;
+    }
+
+    if (!settings && !rules && !catchAll) {
+      return null;
+    }
+
+    return false;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function verifySubdomainDns(fullDomain: string, env: Env): Promise<SubdomainDnsVerificationResult> {
+  const endpoint = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(fullDomain)}&type=MX`;
+  try {
+    const response = await fetch(endpoint, {
+      headers: {
+        accept: "application/dns-json"
+      }
+    });
+    if (!response.ok) {
+      return {
+        verificationStatus: "unverified",
+        mxRecords: [],
+        routingDetected: false,
+        apiChecked: false,
+        detailKey: "subdomainMxTemporary"
+      };
+    }
+
+    const payload = (await response.json()) as DnsJsonResponse;
+    if (payload.Status === 3) {
+      return {
+        verificationStatus: "invalid",
+        mxRecords: [],
+        routingDetected: false,
+        apiChecked: false,
+        detailKey: "subdomainMxMissing"
+      };
+    }
+
+    const mxRecords = (payload.Answer ?? [])
+      .map((answer) => String(answer.data ?? "").trim().replace(/\.$/, ""))
+      .filter(Boolean);
+    if (mxRecords.length === 0) {
+      return {
+        verificationStatus: "invalid",
+        mxRecords: [],
+        routingDetected: false,
+        apiChecked: false,
+        detailKey: "subdomainMxMissing"
+      };
+    }
+
+    const mxRoutingDetected = mxRecords.some(isCloudflareRoutingMx);
+    if (!mxRoutingDetected) {
+      return {
+        verificationStatus: "unverified",
+        mxRecords,
+        routingDetected: false,
+        apiChecked: false,
+        detailKey: "subdomainMxOther"
+      };
+    }
+
+    const apiRoutingDetected = await detectCloudflareEmailRouting(env, fullDomain);
+    if (apiRoutingDetected === true) {
+      return {
+        verificationStatus: "verified",
+        mxRecords,
+        routingDetected: true,
+        apiChecked: true,
+        detailKey: "subdomainMxAndRoutingCloudflare"
+      };
+    }
+
+    if (apiRoutingDetected === false) {
+      return {
+        verificationStatus: "unverified",
+        mxRecords,
+        routingDetected: false,
+        apiChecked: true,
+        detailKey: "subdomainMxCloudflareRoutingMissing"
+      };
+    }
+
+    return {
+      verificationStatus: "verified",
+      mxRecords,
+      routingDetected: true,
+      apiChecked: false,
+      detailKey: env.CLOUDFLARE_API_TOKEN?.trim() || env.CLOUDFLARE_ZONE_ID?.trim()
+        ? "subdomainMxCloudflare"
+        : "subdomainMxCloudflareApiNotConfigured"
+    };
+  } catch (_error) {
+    return {
+      verificationStatus: "unverified",
+      mxRecords: [],
+      routingDetected: false,
+      apiChecked: false,
+      detailKey: "subdomainMxTemporary"
+    };
+  }
+}
+
 function normalizeEmailAddress(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -4743,322 +4741,6 @@ function getFirstMailbox(addresses?: Address[]): { name: string | null; address:
   return { name: null, address: null };
 }
 
-function stripHtml(value: string): string {
-  return value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function escapeHtmlText(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function decodeQuotedAttribute(rawValue: string): string {
-  const value = rawValue.trim();
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function readTagAttribute(rawAttributes: string, attributeName: string): string | null {
-  const pattern = new RegExp(
-    `${attributeName}\\s*=\\s*("([^"]*)"|'([^']*)'|[^\\s"'=<>` + "`" + `]+)`,
-    "i"
-  );
-  const match = rawAttributes.match(pattern);
-  if (!match) {
-    return null;
-  }
-
-  return decodeQuotedAttribute(match[1]);
-}
-
-function sanitizeHref(value: string | null): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const normalized = value.trim().replace(/[\u0000-\u001F\u007F\s]+/g, "");
-  if (/^https?:/i.test(normalized) || /^mailto:/i.test(normalized)) {
-    return normalized;
-  }
-
-  return null;
-}
-
-function sanitizeImageSrc(value: string | null, cidMap: Map<string, string>): string | null {
-  if (!value) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-  if (/^\/api\/mailboxes\/[^/]+\/emails\/[^/]+\/attachments\/[^/]+\/preview\b/i.test(trimmed)) {
-    return trimmed;
-  }
-
-  if (trimmed.toLowerCase().startsWith("cid:")) {
-    const cidKey = trimmed.slice(4).replace(/^<|>$/g, "").toLowerCase();
-    return cidMap.get(cidKey) ?? null;
-  }
-
-  return null;
-}
-
-function sanitizeTableSpan(rawAttributes: string, attributeName: "colspan" | "rowspan"): string | null {
-  const value = readTagAttribute(rawAttributes, attributeName);
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 20) {
-    return null;
-  }
-
-  return String(parsed);
-}
-
-function htmlToReadableText(value: string): string {
-  return value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])\s*\/?>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "- ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\r\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-const HTML_EMAIL_ALLOWED_TAGS = new Set([
-  "a",
-  "article",
-  "b",
-  "blockquote",
-  "br",
-  "code",
-  "div",
-  "em",
-  "h1",
-  "h2",
-  "h3",
-  "h4",
-  "h5",
-  "h6",
-  "hr",
-  "i",
-  "img",
-  "li",
-  "ol",
-  "p",
-  "pre",
-  "section",
-  "span",
-  "strong",
-  "table",
-  "tbody",
-  "td",
-  "th",
-  "thead",
-  "tr",
-  "u",
-  "ul"
-]);
-
-function sanitizeHtmlEmail(value: string, cidMap: Map<string, string>): string {
-  const withoutBlockedSections = value
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/<(script|style|iframe|object|embed|form|input|button|select|textarea|video|audio|canvas|svg|math|meta|base|link|head|title|noscript)[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/<(script|style|iframe|object|embed|form|input|button|select|textarea|video|audio|canvas|svg|math|meta|base|link|head|title|noscript)\b[^>]*\/?>/gi, "");
-
-  const withBlockedImages = withoutBlockedSections.replace(/<img\b([^>]*)\/?>/gi, (_match, rawAttributes) => {
-    const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap);
-    const altText = readTagAttribute(rawAttributes, "alt");
-    if (src) {
-      const altPart = altText ? ` alt="${escapeHtmlText(altText)}"` : "";
-      return `<img src="${escapeHtmlText(src)}"${altPart} class="email-inline-image" />`;
-    }
-
-    const label = altText ? `[Image blocked: ${escapeHtmlText(altText)}]` : "[Image blocked]";
-    return `<span class="email-image-blocked">${label}</span>`;
-  });
-
-  return withBlockedImages.replace(/<\/?([a-z0-9:-]+)([^>]*)>/gi, (fullMatch, rawTagName, rawAttributes) => {
-    const isClosingTag = fullMatch.startsWith("</");
-    const tagName = rawTagName.toLowerCase();
-    if (!HTML_EMAIL_ALLOWED_TAGS.has(tagName)) {
-      return "";
-    }
-
-    if (isClosingTag) {
-      return `</${tagName}>`;
-    }
-
-    let sanitizedAttributes = "";
-
-    if (tagName === "a") {
-      const href = sanitizeHref(readTagAttribute(rawAttributes, "href"));
-      if (href) {
-        sanitizedAttributes = ` href="${escapeHtmlText(href)}" target="_blank" rel="nofollow noopener noreferrer"`;
-      }
-    }
-
-    if (tagName === "span") {
-      const className = readTagAttribute(rawAttributes, "class");
-      if (className === "email-image-blocked") {
-        sanitizedAttributes += ` class="email-image-blocked"`;
-      }
-    }
-
-    if (tagName === "img") {
-      const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap);
-      if (!src) {
-        return "";
-      }
-      const altText = readTagAttribute(rawAttributes, "alt");
-      sanitizedAttributes += ` src="${escapeHtmlText(src)}" class="email-inline-image"`;
-      if (altText) {
-        sanitizedAttributes += ` alt="${escapeHtmlText(altText)}"`;
-      }
-    }
-
-    if (tagName === "td" || tagName === "th") {
-      const colspan = sanitizeTableSpan(rawAttributes, "colspan");
-      const rowspan = sanitizeTableSpan(rawAttributes, "rowspan");
-      if (colspan) {
-        sanitizedAttributes += ` colspan="${colspan}"`;
-      }
-      if (rowspan) {
-        sanitizedAttributes += ` rowspan="${rowspan}"`;
-      }
-    }
-
-    return `<${tagName}${sanitizedAttributes}>`;
-  });
-}
-
-function wrapSanitizedHtmlDocument(value: string): string {
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline';" />
-    <style>
-      body {
-        margin: 0;
-        padding: 18px;
-        color: #1c1b19;
-        background: #ffffff;
-        font: 14px/1.6 "Segoe UI", "Noto Sans", sans-serif;
-        overflow-wrap: anywhere;
-      }
-      a {
-        color: #0f5848;
-      }
-      p, div, blockquote, pre, ul, ol, table {
-        margin: 0 0 12px;
-      }
-      pre {
-        white-space: pre-wrap;
-        background: #f6f4ee;
-        border: 1px solid #ddd6c6;
-        border-radius: 8px;
-        padding: 12px;
-      }
-      blockquote {
-        border-left: 3px solid #ddd6c6;
-        padding-left: 12px;
-        color: #67635b;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th, td {
-        border: 1px solid #ddd6c6;
-        padding: 8px 10px;
-        text-align: left;
-        vertical-align: top;
-      }
-      .email-image-blocked {
-        display: inline-block;
-        padding: 6px 8px;
-        border: 1px dashed #ddd6c6;
-        border-radius: 6px;
-        background: #f8f5ee;
-        color: #67635b;
-        font-size: 13px;
-      }
-      .email-inline-image {
-        display: block;
-        max-width: 100%;
-        height: auto;
-        margin: 0 0 12px;
-        border: 1px solid #ddd6c6;
-        border-radius: 8px;
-        background: #f8f5ee;
-      }
-    </style>
-  </head>
-  <body>${value}</body>
-</html>`;
-}
-
-function buildPreview(email: Email): string | null {
-  const source = email.text?.trim() || (email.html ? stripHtml(email.html) : "");
-  if (!source) {
-    return null;
-  }
-
-  return source.slice(0, 240);
-}
-
-function resolveReceivedAt(email: Email): string {
-  if (email.date) {
-    const parsed = new Date(email.date);
-    if (!Number.isNaN(parsed.getTime())) {
-      return toSqliteTimestamp(parsed);
-    }
-  }
-
-  return nowTimestamp();
-}
-
-function sanitizeKeyPart(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "mail";
-}
-
-function buildEmailStoragePrefix(mailboxId: string, emailId: string, receivedAt: string): string {
-  const stamp = receivedAt.replace(/[^\d]/g, "").slice(0, 14) || Date.now().toString();
-  return `mailboxes/${mailboxId}/${stamp}-${emailId}`;
-}
-
-function toAttachmentBytes(content: string | ArrayBuffer | Uint8Array): Uint8Array {
-  if (content instanceof Uint8Array) {
-    return content;
-  }
-
-  if (content instanceof ArrayBuffer) {
-    return new Uint8Array(content);
-  }
-
-  return new TextEncoder().encode(content);
-}
-
 async function readBucketText(bucket: R2Bucket, key: string | null): Promise<string | null> {
   if (!key) {
     return null;
@@ -5081,6 +4763,85 @@ async function deleteBucketKeys(bucket: R2Bucket, keys: string[]): Promise<void>
   await bucket.delete(uniqueKeys);
 }
 
+async function runRetentionCleanup(env: Env, limit = 100): Promise<number> {
+  const expiredEmails = await listExpiredEmailsForRetention(env.DB, limit);
+  if (expiredEmails.length === 0) {
+    return 0;
+  }
+
+  const emailIds = expiredEmails.map((email) => email.id);
+  const attachmentKeys = await listAttachmentKeysForEmails(env.DB, emailIds);
+  const emailKeys = expiredEmails.flatMap((email) =>
+    [email.text_body_r2_key, email.html_body_r2_key, email.raw_r2_key].filter(Boolean) as string[]
+  );
+  await deleteBucketKeys(env.MAIL_BUCKET, [...emailKeys, ...attachmentKeys]);
+  const deletedCount = await hardDeleteEmailsByIds(env.DB, emailIds);
+  for (const mailboxId of new Set(expiredEmails.map((email) => email.mailbox_id))) {
+    await refreshMailboxEmailCounters(env.DB, mailboxId);
+  }
+
+  return deletedCount;
+}
+
+async function scanR2OrphanObjects(env: Env, limit = 500): Promise<{ scannedCount: number; orphanCount: number; sampleKeys: string[] }> {
+  const knownKeys = new Set([...(await listAllEmailStorageKeys(env.DB)), ...(await listAllAttachmentKeys(env.DB))]);
+  let cursor: string | undefined;
+  let scannedCount = 0;
+  const sampleKeys: string[] = [];
+
+  do {
+    const page = await env.MAIL_BUCKET.list({
+      cursor,
+      limit: Math.min(100, Math.max(1, limit - scannedCount))
+    });
+    for (const object of page.objects) {
+      scannedCount += 1;
+      if (!knownKeys.has(object.key) && sampleKeys.length < 20) {
+        sampleKeys.push(object.key);
+      }
+    }
+    cursor = page.truncated && scannedCount < limit ? page.cursor : undefined;
+  } while (cursor && scannedCount < limit);
+
+  return {
+    scannedCount,
+    orphanCount: sampleKeys.length,
+    sampleKeys
+  };
+}
+
+async function runProductionMaintenance(env: Env): Promise<{
+  expiredEmailsDeleted: number;
+  softDeletedMailboxesArchived: number;
+  r2OrphanScan: { scannedCount: number; orphanCount: number; sampleKeys: string[] };
+}> {
+  const expiredEmailsDeleted = await runRetentionCleanup(env, getNumberVar(env.MAINTENANCE_RETENTION_BATCH_SIZE, 100));
+  const softDeletedMailboxesArchived = await archiveSoftDeletedMailboxes(
+    env.DB,
+    getNumberVar(env.MAINTENANCE_ARCHIVE_DELETED_AFTER_DAYS, 30)
+  );
+  const r2OrphanScan = await scanR2OrphanObjects(env, getNumberVar(env.MAINTENANCE_R2_SCAN_LIMIT, 500));
+
+  await writeAuditLog(env.DB, {
+    actorType: "system",
+    actorId: null,
+    action: "maintenance.completed",
+    targetType: "system",
+    targetId: null,
+    metadata: {
+      expiredEmailsDeleted,
+      softDeletedMailboxesArchived,
+      r2OrphanScan
+    }
+  });
+
+  return {
+    expiredEmailsDeleted,
+    softDeletedMailboxesArchived,
+    r2OrphanScan
+  };
+}
+
 async function collectMailboxStorageKeys(db: D1Database, mailboxId: string): Promise<string[]> {
   const [emailKeys, attachmentKeys] = await Promise.all([
     listEmailStorageKeysForMailbox(db, mailboxId),
@@ -5099,6 +4860,11 @@ async function deleteMailboxWithStorage(env: Env, mailboxId: string): Promise<bo
   }
 
   return false;
+}
+
+async function softDeleteMailboxKeepingStorage(env: Env, mailboxId: string): Promise<boolean> {
+  const deletedCount = await softDeleteMailboxById(env.DB, mailboxId);
+  return deletedCount > 0;
 }
 
 async function deleteSubdomainWithStorage(env: Env, subdomainId: string): Promise<{
@@ -5317,9 +5083,11 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
   return json({
     stats,
     config: {
-      baseDomain: env.BASE_DOMAIN,
+      baseDomain: resolveBaseDomain(request, env),
+      configuredBaseDomain: env.BASE_DOMAIN,
       bootstrapAdminUsername: env.BOOTSTRAP_ADMIN_USERNAME,
       cfAccessEnabled: getBooleanVar(env.CF_ACCESS_ENABLED, false),
+      cloudflareApiConfigured: Boolean(env.CLOUDFLARE_API_TOKEN?.trim() && env.CLOUDFLARE_ZONE_ID?.trim()),
       sessionTtlHours: getNumberVar(env.SESSION_TTL_HOURS, 24),
       maxLoginFailures: getNumberVar(env.MAX_LOGIN_FAILURES, 10),
       loginBlockMinutes: getNumberVar(env.LOGIN_BLOCK_MINUTES, 15)
@@ -5508,6 +5276,31 @@ async function handleAdminLoginAttemptsClear(request: Request, env: Env): Promis
   });
 }
 
+async function handleMaintenanceRunApi(request: Request, env: Env): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const result = await runProductionMaintenance(env);
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "maintenance.run_manually",
+    targetType: "system",
+    targetId: null,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: result
+  });
+
+  return json({
+    ok: true,
+    result
+  });
+}
+
 async function handleSubdomainListApi(request: Request, env: Env): Promise<Response> {
   const locale = resolveLocale(request);
   const admin = await getAuthenticatedAdmin(request, env);
@@ -5526,9 +5319,159 @@ async function handleSubdomainListApi(request: Request, env: Env): Promise<Respo
       id: item.id,
       fullDomain: item.full_domain,
       status: item.status,
+      verificationStatus: item.verification_status,
       createdAt: item.created_at,
       mailboxCount: item.mailbox_count ?? 0
     }))
+  });
+}
+
+async function handleMailboxGroupListApi(request: Request, env: Env): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const items = await listMailboxGroups(env.DB, 200);
+  return json({
+    items: items.map((item) => ({
+      id: item.id,
+      name: item.name,
+      color: item.color,
+      createdAt: item.created_at,
+      mailboxCount: item.mailbox_count ?? 0
+    }))
+  });
+}
+
+async function handleMailboxGroupCreateApi(request: Request, env: Env): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const body = await parseJsonBody(request);
+  const name = String(body.name ?? "").trim().slice(0, 40);
+  const color = normalizeGroupColor(body.color);
+  if (!name) {
+    return errorResponse(400, "INVALID_GROUP_NAME", t(locale, "invalidGroupName"));
+  }
+  if (!color) {
+    return errorResponse(400, "INVALID_GROUP_COLOR", t(locale, "invalidGroupColor"));
+  }
+
+  try {
+    const group = await createMailboxGroup(env.DB, { name, color });
+    await writeAuditLog(env.DB, {
+      actorType: "admin",
+      actorId: admin.adminId,
+      action: "mailbox_group.created",
+      targetType: "mailbox_group",
+      targetId: group.id,
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get("user-agent"),
+      metadata: { name }
+    });
+
+    return json({ group }, { status: 201 });
+  } catch (_error) {
+    return errorResponse(409, "MAILBOX_GROUP_CONFLICT", t(locale, "unexpectedError"));
+  }
+}
+
+async function handleMailboxGroupUpdateApi(
+  request: Request,
+  env: Env,
+  groupId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const group = await getMailboxGroupById(env.DB, groupId);
+  if (!group) {
+    return errorResponse(404, "MAILBOX_GROUP_NOT_FOUND", t(locale, "invalidInput"));
+  }
+
+  const body = await parseJsonBody(request);
+  const name = String(body.name ?? "").trim().slice(0, 40);
+  const color = normalizeGroupColor(body.color);
+  if (!name) {
+    return errorResponse(400, "INVALID_GROUP_NAME", t(locale, "invalidGroupName"));
+  }
+  if (!color) {
+    return errorResponse(400, "INVALID_GROUP_COLOR", t(locale, "invalidGroupColor"));
+  }
+
+  try {
+    await updateMailboxGroup(env.DB, groupId, { name, color });
+    await writeAuditLog(env.DB, {
+      actorType: "admin",
+      actorId: admin.adminId,
+      action: "mailbox_group.updated",
+      targetType: "mailbox_group",
+      targetId: groupId,
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get("user-agent"),
+      metadata: { previousName: group.name, name, color }
+    });
+
+    return json({
+      ok: true,
+      group: {
+        id: groupId,
+        name,
+        color
+      }
+    });
+  } catch (_error) {
+    return errorResponse(409, "MAILBOX_GROUP_CONFLICT", t(locale, "unexpectedError"));
+  }
+}
+
+async function handleMailboxGroupDeleteApi(
+  request: Request,
+  env: Env,
+  groupId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const group = await getMailboxGroupById(env.DB, groupId);
+  if (!group) {
+    return errorResponse(404, "MAILBOX_GROUP_NOT_FOUND", t(locale, "invalidInput"));
+  }
+
+  const mailboxCount = await countMailboxesInGroup(env.DB, groupId);
+  if (mailboxCount > 0) {
+    return errorResponse(409, "MAILBOX_GROUP_NOT_EMPTY", t(locale, "groupNotEmpty"));
+  }
+
+  await deleteMailboxGroupById(env.DB, groupId);
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "mailbox_group.deleted",
+    targetType: "mailbox_group",
+    targetId: groupId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: { name: group.name }
+  });
+
+  return json({
+    ok: true,
+    group: {
+      id: groupId,
+      name: group.name
+    }
   });
 }
 
@@ -5547,13 +5490,14 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
     .filter((item) => isValidSubdomainLabel(item));
+  const baseDomain = resolveBaseDomain(request, env);
 
   if (customLabels.length > 0) {
     const createdCount = await insertSubdomains(
       env.DB,
       customLabels.map((label) => ({
         label,
-        fullDomain: `${label}.${env.BASE_DOMAIN}`
+        fullDomain: `${label}.${baseDomain}`
       }))
     );
 
@@ -5565,7 +5509,7 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
       targetId: null,
       ipAddress: getClientIp(request),
       userAgent: request.headers.get("user-agent"),
-      metadata: { requestedCount: customLabels.length, createdCount }
+      metadata: { requestedCount: customLabels.length, createdCount, baseDomain }
     });
 
     return json({ createdCount });
@@ -5583,7 +5527,7 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
       const label = createRandomLabel(labelLength);
       candidates.push({
         label,
-        fullDomain: `${label}.${env.BASE_DOMAIN}`
+        fullDomain: `${label}.${baseDomain}`
       });
     }
 
@@ -5598,7 +5542,7 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
     targetId: null,
     ipAddress: getClientIp(request),
     userAgent: request.headers.get("user-agent"),
-    metadata: { requestedCount: count, labelLength, createdCount }
+    metadata: { requestedCount: count, labelLength, createdCount, baseDomain }
   });
 
   return json({ createdCount });
@@ -5692,6 +5636,153 @@ async function handleDeleteSelectedSubdomain(
   });
 }
 
+async function handleSubdomainVerificationUpdate(
+  request: Request,
+  env: Env,
+  subdomainId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const subdomain = await getSubdomainById(env.DB, subdomainId);
+  if (!subdomain) {
+    return errorResponse(404, "SUBDOMAIN_NOT_FOUND", t(locale, "noSuchSubdomain"));
+  }
+
+  const body = await parseJsonBody(request);
+  const verificationStatus = String(body.verificationStatus ?? "");
+  if (!["verified", "unverified", "invalid"].includes(verificationStatus)) {
+    return errorResponse(400, "INVALID_INPUT", t(locale, "invalidInput"));
+  }
+
+  await updateSubdomainVerificationStatus(
+    env.DB,
+    subdomainId,
+    verificationStatus as "verified" | "unverified" | "invalid"
+  );
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "subdomain.verification_updated",
+    targetType: "subdomain",
+    targetId: subdomainId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      fullDomain: subdomain.full_domain,
+      verificationStatus
+    }
+  });
+
+  return json({
+    ok: true,
+    verificationStatus
+  });
+}
+
+async function handleSubdomainVerifyApi(
+  request: Request,
+  env: Env,
+  subdomainId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const subdomain = await getSubdomainById(env.DB, subdomainId);
+  if (!subdomain) {
+    return errorResponse(404, "SUBDOMAIN_NOT_FOUND", t(locale, "noSuchSubdomain"));
+  }
+
+  const result = await verifySubdomainDns(subdomain.full_domain, env);
+  await updateSubdomainVerificationStatus(env.DB, subdomainId, result.verificationStatus);
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "subdomain.verification_checked",
+    targetType: "subdomain",
+    targetId: subdomainId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      fullDomain: subdomain.full_domain,
+      verificationStatus: result.verificationStatus,
+      routingDetected: result.routingDetected,
+      apiChecked: result.apiChecked,
+      mxRecords: result.mxRecords
+    }
+  });
+
+  return json({
+    ok: true,
+    fullDomain: subdomain.full_domain,
+    verificationStatus: result.verificationStatus,
+    mxRecords: result.mxRecords,
+    routingDetected: result.routingDetected,
+    apiChecked: result.apiChecked,
+    detail: t(locale, result.detailKey)
+  });
+}
+
+async function handleSubdomainVerifyAllApi(request: Request, env: Env): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const subdomains = await listSubdomains(env.DB, 500);
+  const checked: Array<{
+    id: string;
+    fullDomain: string;
+    verificationStatus: string;
+    mxRecords: string[];
+    routingDetected: boolean;
+    apiChecked: boolean;
+    detail: string;
+  }> = [];
+
+  for (const subdomain of subdomains) {
+    const result = await verifySubdomainDns(subdomain.full_domain, env);
+    await updateSubdomainVerificationStatus(env.DB, subdomain.id, result.verificationStatus);
+    checked.push({
+      id: subdomain.id,
+      fullDomain: subdomain.full_domain,
+      verificationStatus: result.verificationStatus,
+      mxRecords: result.mxRecords,
+      routingDetected: result.routingDetected,
+      apiChecked: result.apiChecked,
+      detail: t(locale, result.detailKey)
+    });
+  }
+
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "subdomains.verification_checked",
+    targetType: "subdomain_pool",
+    targetId: null,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      checkedCount: checked.length,
+      verifiedCount: checked.filter((item) => item.verificationStatus === "verified").length,
+      invalidCount: checked.filter((item) => item.verificationStatus === "invalid").length
+    }
+  });
+
+  return json({
+    ok: true,
+    checkedCount: checked.length,
+    items: checked
+  });
+}
+
 async function handleMailboxListApi(request: Request, env: Env): Promise<Response> {
   const locale = resolveLocale(request);
   const admin = await getAuthenticatedAdmin(request, env);
@@ -5709,6 +5800,9 @@ async function handleMailboxListApi(request: Request, env: Env): Promise<Respons
     items: items.map((item) => ({
       id: item.id,
       subdomainId: item.subdomain_id,
+      groupId: item.group_id,
+      groupName: item.group_name ?? "",
+      groupColor: item.group_color ?? "",
       fullDomain: item.full_domain ?? "",
       fullAddress: item.full_address,
       status: item.status,
@@ -5735,7 +5829,10 @@ async function handleDeleteSelectedMailbox(
     return errorResponse(404, "MAILBOX_NOT_FOUND", t(locale, "mailboxNotFound"));
   }
 
-  const deleted = await deleteMailboxWithStorage(env, mailboxId);
+  const shouldKeepStoredMail = mailbox.total_email_count > 0;
+  const deleted = shouldKeepStoredMail
+    ? await softDeleteMailboxKeepingStorage(env, mailboxId)
+    : await deleteMailboxWithStorage(env, mailboxId);
   if (!deleted) {
     return errorResponse(409, "MAILBOX_DELETE_FAILED", t(locale, "unexpectedError"));
   }
@@ -5743,7 +5840,7 @@ async function handleDeleteSelectedMailbox(
   await writeAuditLog(env.DB, {
     actorType: "admin",
     actorId: admin.adminId,
-    action: "mailbox.deleted",
+    action: shouldKeepStoredMail ? "mailbox.soft_deleted" : "mailbox.hard_deleted_empty",
     targetType: "mailbox",
     targetId: mailboxId,
     ipAddress: getClientIp(request),
@@ -5756,8 +5853,169 @@ async function handleDeleteSelectedMailbox(
 
   return json({
     ok: true,
+    deletionMode: shouldKeepStoredMail ? "soft" : "hard",
     fullAddress: mailbox.full_address,
     totalEmailCount: mailbox.total_email_count
+  });
+}
+
+async function handleMailboxNoteUpdateApi(
+  request: Request,
+  env: Env,
+  mailboxId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const mailbox = await getMailboxById(env.DB, mailboxId);
+  if (!mailbox) {
+    return errorResponse(404, "MAILBOX_NOT_FOUND", t(locale, "mailboxNotFound"));
+  }
+
+  const body = await parseJsonBody(request);
+  const rawNote = String(body.note ?? "").trim();
+  if (rawNote.length > 140) {
+    return errorResponse(400, "NOTE_TOO_LONG", t(locale, "noteTooLong"));
+  }
+
+  const note = rawNote || null;
+  await updateMailboxNote(env.DB, mailboxId, note);
+
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "mailbox.note_updated",
+    targetType: "mailbox",
+    targetId: mailboxId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      fullAddress: mailbox.full_address,
+      hadPreviousNote: Boolean(mailbox.note),
+      hasNextNote: Boolean(note)
+    }
+  });
+
+  return json({
+    ok: true,
+    mailbox: {
+      id: mailboxId,
+      note
+    }
+  });
+}
+
+async function handleMailboxMetadataUpdateApi(
+  request: Request,
+  env: Env,
+  mailboxId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const mailbox = await getMailboxById(env.DB, mailboxId);
+  if (!mailbox) {
+    return errorResponse(404, "MAILBOX_NOT_FOUND", t(locale, "mailboxNotFound"));
+  }
+
+  const body = await parseJsonBody(request);
+  const rawNote = String(body.note ?? "").trim();
+  if (rawNote.length > 140) {
+    return errorResponse(400, "NOTE_TOO_LONG", t(locale, "noteTooLong"));
+  }
+
+  const groupId = String(body.groupId ?? "").trim() || null;
+  if (groupId) {
+    const group = await getMailboxGroupById(env.DB, groupId);
+    if (!group) {
+      return errorResponse(400, "INVALID_GROUP", t(locale, "invalidInput"));
+    }
+  }
+
+  const note = rawNote || null;
+  await updateMailboxMetadata(env.DB, mailboxId, { note, groupId });
+
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "mailbox.metadata_updated",
+    targetType: "mailbox",
+    targetId: mailboxId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      fullAddress: mailbox.full_address,
+      groupId,
+      hadPreviousNote: Boolean(mailbox.note),
+      hasNextNote: Boolean(note)
+    }
+  });
+
+  const updatedMailbox = await getMailboxById(env.DB, mailboxId);
+  return json({
+    ok: true,
+    mailbox: {
+      id: mailboxId,
+      fullAddress: mailbox.full_address,
+      note,
+      groupId,
+      groupName: updatedMailbox?.group_name ?? "",
+      groupColor: updatedMailbox?.group_color ?? ""
+    }
+  });
+}
+
+async function handleMailboxStatusUpdateApi(
+  request: Request,
+  env: Env,
+  mailboxId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const mailbox = await getMailboxById(env.DB, mailboxId);
+  if (!mailbox) {
+    return errorResponse(404, "MAILBOX_NOT_FOUND", t(locale, "mailboxNotFound"));
+  }
+
+  const body = await parseJsonBody(request);
+  const status = String(body.status ?? "");
+  if (!["active", "paused", "archived"].includes(status)) {
+    return errorResponse(400, "INVALID_MAILBOX_STATUS", t(locale, "invalidInput"));
+  }
+
+  await updateMailboxStatus(env.DB, mailboxId, status as "active" | "paused" | "archived");
+  await writeAuditLog(env.DB, {
+    actorType: "admin",
+    actorId: admin.adminId,
+    action: "mailbox.status_updated",
+    targetType: "mailbox",
+    targetId: mailboxId,
+    ipAddress: getClientIp(request),
+    userAgent: request.headers.get("user-agent"),
+    metadata: {
+      fullAddress: mailbox.full_address,
+      previousStatus: mailbox.status,
+      status
+    }
+  });
+
+  return json({
+    ok: true,
+    mailbox: {
+      id: mailboxId,
+      fullAddress: mailbox.full_address,
+      status
+    }
   });
 }
 
@@ -5777,6 +6035,9 @@ async function handleMailboxDetailApi(request: Request, env: Env, mailboxId: str
     mailbox: {
       id: mailbox.id,
       fullAddress: mailbox.full_address,
+      groupId: mailbox.group_id,
+      groupName: mailbox.group_name ?? "",
+      groupColor: mailbox.group_color ?? "",
       status: mailbox.status,
       note: mailbox.note,
       createdAt: mailbox.created_at,
@@ -6119,6 +6380,8 @@ async function handleCreateMailbox(request: Request, env: Env): Promise<Response
 
   const body = await parseJsonBody(request);
   const subdomainId = String(body.subdomainId ?? "").trim();
+  const candidateSubdomainId = String(body.candidateSubdomainId ?? "").trim();
+  const groupId = String(body.groupId ?? "").trim() || null;
   const localPartMode = String(body.localPartMode ?? "random");
   const localPart =
     localPartMode === "custom"
@@ -6130,23 +6393,64 @@ async function handleCreateMailbox(request: Request, env: Env): Promise<Response
     return errorResponse(400, "INVALID_LOCAL_PART", t(locale, "invalidLocalPart"));
   }
 
+  if (groupId) {
+    const group = await getMailboxGroupById(env.DB, groupId);
+    if (!group) {
+      return errorResponse(400, "INVALID_GROUP", t(locale, "invalidInput"));
+    }
+  }
+
   const subdomain = subdomainId
     ? await getSubdomainById(env.DB, subdomainId)
-    : await findAvailableSubdomain(env.DB);
+    : candidateSubdomainId
+      ? (await findSubdomainByIdForMailboxCreation(env.DB, candidateSubdomainId)) ?? (await findAvailableSubdomain(env.DB))
+      : await findAvailableSubdomain(env.DB);
   if (!subdomain) {
     return errorResponse(409, "NO_SUBDOMAIN_AVAILABLE", t(locale, "noSubdomainAvailable"));
   }
-  if (subdomain.status === "disabled") {
+  if (subdomain.status === "disabled" || subdomain.verification_status === "invalid") {
     return errorResponse(409, "SUBDOMAIN_DISABLED", t(locale, "noSuchSubdomain"));
   }
 
   const fullAddress = `${localPart}@${subdomain.full_domain}`;
   const existingMailboxCount = await countExistingMailboxForSubdomain(env.DB, subdomain.id);
+  const deletedMailbox = await findDeletedMailboxByAddress(env.DB, fullAddress);
+  if (deletedMailbox) {
+    await restoreDeletedMailbox(env.DB, deletedMailbox.id, {
+      note,
+      groupId
+    });
+    await refreshMailboxEmailCounters(env.DB, deletedMailbox.id);
+
+    await writeAuditLog(env.DB, {
+      actorType: "admin",
+      actorId: admin.adminId,
+      action: "mailbox.restored",
+      targetType: "mailbox",
+      targetId: deletedMailbox.id,
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get("user-agent"),
+      metadata: { fullAddress, note, subdomainId: subdomain.id, groupId }
+    });
+
+    return json(
+      {
+        restored: true,
+        mailbox: {
+          id: deletedMailbox.id,
+          fullAddress,
+          status: "active"
+        }
+      },
+      { status: 200 }
+    );
+  }
 
   try {
     const created = await createMailbox(env.DB, {
       localPart,
       subdomainId: subdomain.id,
+      groupId,
       fullAddress,
       note
     });
@@ -6159,11 +6463,12 @@ async function handleCreateMailbox(request: Request, env: Env): Promise<Response
       targetId: created.id,
       ipAddress: getClientIp(request),
       userAgent: request.headers.get("user-agent"),
-      metadata: { fullAddress, note, subdomainId: subdomain.id, priorMailboxCount: existingMailboxCount }
+      metadata: { fullAddress, note, subdomainId: subdomain.id, groupId, priorMailboxCount: existingMailboxCount }
     });
 
     return json(
       {
+        restored: false,
         mailbox: {
           id: created.id,
           fullAddress,
@@ -6383,8 +6688,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     request.method === "POST" ? url.pathname.match(/^\/api\/admin\/sessions\/([^/]+)\/revoke$/) : null;
   const mailboxDeleteMatch =
     request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/delete$/) : null;
+  const mailboxMetadataMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/metadata$/) : null;
+  const mailboxStatusMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/status$/) : null;
+  const mailboxNoteUpdateMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/note$/) : null;
   const subdomainDeleteMatch =
     request.method === "POST" ? url.pathname.match(/^\/api\/subdomains\/([^/]+)\/delete$/) : null;
+  const subdomainVerificationMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/subdomains\/([^/]+)\/verification$/) : null;
+  const subdomainVerifyMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/subdomains\/([^/]+)\/verify$/) : null;
+  const mailboxGroupUpdateMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/mailbox-groups\/([^/]+)$/) : null;
+  const mailboxGroupDeleteMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/mailbox-groups\/([^/]+)\/delete$/) : null;
   const mailboxApiMatch = request.method === "GET" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)$/) : null;
 
   if (request.method === "GET" && url.pathname === "/") {
@@ -6447,6 +6766,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return handleAdminLoginAttemptsClear(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/api/maintenance/run") {
+    return handleMaintenanceRunApi(request, env);
+  }
+
   if (adminSessionRevokeMatch) {
     return handleAdminSessionRevoke(request, env, adminSessionRevokeMatch[1]);
   }
@@ -6459,12 +6782,40 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return handleGenerateSubdomains(request, env);
   }
 
+  if (request.method === "GET" && url.pathname === "/api/mailbox-groups") {
+    return handleMailboxGroupListApi(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/mailbox-groups") {
+    return handleMailboxGroupCreateApi(request, env);
+  }
+
+  if (mailboxGroupDeleteMatch) {
+    return handleMailboxGroupDeleteApi(request, env, mailboxGroupDeleteMatch[1]);
+  }
+
+  if (mailboxGroupUpdateMatch) {
+    return handleMailboxGroupUpdateApi(request, env, mailboxGroupUpdateMatch[1]);
+  }
+
   if (request.method === "POST" && url.pathname === "/api/subdomains/delete-all") {
     return handleDeleteAllSubdomains(request, env);
   }
 
   if (subdomainDeleteMatch) {
     return handleDeleteSelectedSubdomain(request, env, subdomainDeleteMatch[1]);
+  }
+
+  if (subdomainVerificationMatch) {
+    return handleSubdomainVerificationUpdate(request, env, subdomainVerificationMatch[1]);
+  }
+
+  if (subdomainVerifyMatch) {
+    return handleSubdomainVerifyApi(request, env, subdomainVerifyMatch[1]);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/subdomains/verify-all") {
+    return handleSubdomainVerifyAllApi(request, env);
   }
 
   if (request.method === "GET" && url.pathname === "/api/mailboxes") {
@@ -6516,6 +6867,18 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return handleDeleteSelectedMailbox(request, env, mailboxDeleteMatch[1]);
   }
 
+  if (mailboxMetadataMatch) {
+    return handleMailboxMetadataUpdateApi(request, env, mailboxMetadataMatch[1]);
+  }
+
+  if (mailboxStatusMatch) {
+    return handleMailboxStatusUpdateApi(request, env, mailboxStatusMatch[1]);
+  }
+
+  if (mailboxNoteUpdateMatch) {
+    return handleMailboxNoteUpdateApi(request, env, mailboxNoteUpdateMatch[1]);
+  }
+
   if (mailboxEmailsMatch) {
     return handleMailboxEmailsApi(request, env, mailboxEmailsMatch[1]);
   }
@@ -6545,6 +6908,9 @@ export default {
   },
   email(message: ForwardableEmailMessage, env: Env): Promise<void> {
     return handleInboundEmail(message, env);
+  },
+  scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(runProductionMaintenance(env));
   }
 };
 

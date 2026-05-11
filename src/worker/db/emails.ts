@@ -257,6 +257,90 @@ export async function listEmailStorageKeysForMailbox(
   return Array.from(keys);
 }
 
+export async function listAllEmailStorageKeys(db: D1Database): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT
+         text_body_r2_key,
+         html_body_r2_key,
+         raw_r2_key
+       FROM emails`
+    )
+    .all<{
+      text_body_r2_key: string | null;
+      html_body_r2_key: string | null;
+      raw_r2_key: string;
+    }>();
+
+  const keys = new Set<string>();
+  for (const item of result.results ?? []) {
+    if (item.text_body_r2_key) {
+      keys.add(item.text_body_r2_key);
+    }
+    if (item.html_body_r2_key) {
+      keys.add(item.html_body_r2_key);
+    }
+    if (item.raw_r2_key) {
+      keys.add(item.raw_r2_key);
+    }
+  }
+
+  return Array.from(keys);
+}
+
+export interface ExpiredEmailRecord {
+  id: string;
+  mailbox_id: string;
+  text_body_r2_key: string | null;
+  html_body_r2_key: string | null;
+  raw_r2_key: string;
+}
+
+export async function listExpiredEmailsForRetention(
+  db: D1Database,
+  limit = 100
+): Promise<ExpiredEmailRecord[]> {
+  const result = await db
+    .prepare(
+      `SELECT
+         emails.id,
+         emails.mailbox_id,
+         emails.text_body_r2_key,
+         emails.html_body_r2_key,
+         emails.raw_r2_key
+       FROM emails
+       INNER JOIN mailboxes ON mailboxes.id = emails.mailbox_id
+       WHERE emails.deleted_at IS NULL
+         AND mailboxes.deleted_at IS NULL
+         AND mailboxes.retention_mode = 'delete_after_days'
+         AND mailboxes.retention_days IS NOT NULL
+         AND emails.received_at < datetime('now', '-' || mailboxes.retention_days || ' days')
+       ORDER BY emails.received_at ASC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<ExpiredEmailRecord>();
+
+  return result.results ?? [];
+}
+
+export async function hardDeleteEmailsByIds(db: D1Database, emailIds: string[]): Promise<number> {
+  if (emailIds.length === 0) {
+    return 0;
+  }
+
+  const placeholders = emailIds.map(() => "?").join(", ");
+  const result = await db
+    .prepare(
+      `DELETE FROM emails
+       WHERE id IN (${placeholders})`
+    )
+    .bind(...emailIds)
+    .run();
+
+  return result.meta?.changes ?? 0;
+}
+
 export async function createEmailRecord(
   db: D1Database,
   args: EmailInsertArgs

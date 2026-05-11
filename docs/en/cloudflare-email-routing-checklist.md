@@ -76,6 +76,8 @@ For this project's current model, you should only route domains and subdomains t
 ### 4. App configuration
 
 - `BASE_DOMAIN` matches the production domain
+- `CLOUDFLARE_ZONE_ID` is added as a plain variable
+- `CLOUDFLARE_API_TOKEN` is added as a secret with at least Zone Read, DNS Read, and Email Routing Rules Read
 - `BOOTSTRAP_ADMIN_PASSWORD_HASH` or `BOOTSTRAP_ADMIN_PASSWORD_PLAIN` is stored as a secret
 - Cloudflare Access is enabled in front of the admin UI for production
 

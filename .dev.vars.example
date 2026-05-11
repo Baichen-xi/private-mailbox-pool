@@ -11,3 +11,8 @@ BOOTSTRAP_ADMIN_USERNAME=admin
 BOOTSTRAP_ADMIN_PASSWORD_PLAIN=change-this-in-dev
 # 2) Or a precomputed hash:
 # BOOTSTRAP_ADMIN_PASSWORD_HASH=pbkdf2_sha256$100000$REPLACE_BASE64_SALT$REPLACE_BASE64_HASH
+
+# Optional production-only verification helpers.
+# Keep real values in Cloudflare Dashboard Variables and Secrets, not in Git.
+CLOUDFLARE_ZONE_ID=example_zone_id
+# CLOUDFLARE_API_TOKEN=example_read_only_api_token

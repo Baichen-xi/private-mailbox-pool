@@ -117,3 +117,35 @@ export async function listAttachmentKeysForMailbox(
 
   return Array.from(new Set((result.results ?? []).map((item) => item.r2_key).filter(Boolean)));
 }
+
+export async function listAttachmentKeysForEmails(
+  db: D1Database,
+  emailIds: string[]
+): Promise<string[]> {
+  if (emailIds.length === 0) {
+    return [];
+  }
+
+  const placeholders = emailIds.map(() => "?").join(", ");
+  const result = await db
+    .prepare(
+      `SELECT r2_key
+       FROM attachments
+       WHERE email_id IN (${placeholders})`
+    )
+    .bind(...emailIds)
+    .all<{ r2_key: string }>();
+
+  return Array.from(new Set((result.results ?? []).map((item) => item.r2_key).filter(Boolean)));
+}
+
+export async function listAllAttachmentKeys(db: D1Database): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT r2_key
+       FROM attachments`
+    )
+    .all<{ r2_key: string }>();
+
+  return Array.from(new Set((result.results ?? []).map((item) => item.r2_key).filter(Boolean)));
+}

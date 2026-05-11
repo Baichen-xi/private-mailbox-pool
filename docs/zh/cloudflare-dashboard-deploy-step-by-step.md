@@ -380,6 +380,7 @@ main
 ```text
 APP_NAME = Private Mailbox Pool
 BASE_DOMAIN = 你的主域名
+CLOUDFLARE_ZONE_ID = 你的区域 ID
 COOKIE_NAME = pmp_session
 SESSION_TTL_HOURS = 24
 MAX_LOGIN_FAILURES = 10
@@ -392,6 +393,9 @@ BOOTSTRAP_ADMIN_USERNAME = admin
 
 - `BASE_DOMAIN`
   - 必须和你的真实域名一致
+- `CLOUDFLARE_ZONE_ID`
+  - 填区域 ID，不是账户 ID
+  - 用于后台检测 DNS 和 Email Routing 状态
 - `BOOTSTRAP_ADMIN_USERNAME`
   - 建议先直接填 `admin`
 
@@ -403,6 +407,7 @@ BOOTSTRAP_ADMIN_USERNAME = admin
 
 ```text
 BOOTSTRAP_ADMIN_PASSWORD_PLAIN = 你的初始管理员密码
+CLOUDFLARE_API_TOKEN = 你创建的只读 API Token
 ```
 
 例如：
@@ -412,6 +417,8 @@ BOOTSTRAP_ADMIN_PASSWORD_PLAIN = MyStrongPassword123!
 ```
 
 这样第一次登录时，系统会自动把这个明文密码转换成哈希并写入管理员账户。
+
+`CLOUDFLARE_API_TOKEN` 用于后台检测 Email Routing 配置。这个值只显示一次，不要发到聊天里，也不要写进 GitHub。
 
 ### 3. 关于 `BOOTSTRAP_ADMIN_PASSWORD_HASH`
 

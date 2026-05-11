@@ -11,6 +11,11 @@ export interface Env {
   BOOTSTRAP_ADMIN_USERNAME: string;
   BOOTSTRAP_ADMIN_PASSWORD_HASH?: string;
   BOOTSTRAP_ADMIN_PASSWORD_PLAIN?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ZONE_ID?: string;
+  MAINTENANCE_RETENTION_BATCH_SIZE?: string;
+  MAINTENANCE_ARCHIVE_DELETED_AFTER_DAYS?: string;
+  MAINTENANCE_R2_SCAN_LIMIT?: string;
 }
 
 export function getNumberVar(raw: string | undefined, fallback: number): number {

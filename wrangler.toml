@@ -16,6 +16,9 @@ bucket_name = "private-mailbox-pool-mail"
 [[send_email]]
 name = "EMAIL"
 
+[triggers]
+crons = ["17 3 * * *"]
+
 [vars]
 APP_NAME = "Private Mailbox Pool"
 BASE_DOMAIN = "example.com"
@@ -28,3 +31,6 @@ BOOTSTRAP_ADMIN_USERNAME = "admin"
 BOOTSTRAP_ADMIN_PASSWORD_PLAIN = ""
 # Optional: precomputed password hash, used when plain password is left empty.
 BOOTSTRAP_ADMIN_PASSWORD_HASH = ""
+MAINTENANCE_RETENTION_BATCH_SIZE = "100"
+MAINTENANCE_ARCHIVE_DELETED_AFTER_DAYS = "30"
+MAINTENANCE_R2_SCAN_LIMIT = "500"

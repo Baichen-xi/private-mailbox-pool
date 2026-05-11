@@ -32,7 +32,8 @@ export async function getDashboardStats(db: D1Database): Promise<DashboardStats>
       .prepare(
         `SELECT COUNT(*) AS availableSubdomainCount
          FROM subdomains
-         WHERE status = 'available'`
+         WHERE status != 'disabled'
+           AND verification_status != 'invalid'`
       )
       .first<{ availableSubdomainCount: number | string }>()
   ]);

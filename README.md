@@ -55,6 +55,8 @@ BASE_DOMAIN = "yourdomain.com"
 | `BOOTSTRAP_ADMIN_USERNAME` | 初始管理员用户名 | `admin` |
 | `BOOTSTRAP_ADMIN_PASSWORD_PLAIN` | 初始管理员明文密码 | `""` |
 | `BOOTSTRAP_ADMIN_PASSWORD_HASH` | 初始管理员密码哈希 | `""` |
+| `CLOUDFLARE_ZONE_ID` | 可选，用于自动检测域名 DNS 与 Email Routing | `example_zone_id` |
+| `CLOUDFLARE_API_TOKEN` | 可选，只读 API Token，用于自动检测 Email Routing 配置 | Cloudflare Secret |
 
 密码模式支持两种：
 
@@ -73,6 +75,7 @@ BASE_DOMAIN = "yourdomain.com"
 
 - 本地测试或自用演示：可以直接填写 `BOOTSTRAP_ADMIN_PASSWORD_PLAIN`
 - 正式线上：更推荐用 Cloudflare Secret，而不是把真实密码提交到 GitHub
+- 公开仓库：`wrangler.toml` 里只保留示例值，真实域名、Zone ID、API Token、管理员密码都在 Cloudflare 后台填写
 
 ## 4. 本地启动
 
@@ -190,6 +193,8 @@ BOOTSTRAP_ADMIN_PASSWORD_PLAIN = "你的初始密码"
 - `BASE_DOMAIN`
 - `BOOTSTRAP_ADMIN_USERNAME`
 - `BOOTSTRAP_ADMIN_PASSWORD_PLAIN` 或 `BOOTSTRAP_ADMIN_PASSWORD_HASH`
+- `CLOUDFLARE_ZONE_ID`，普通变量，填写域名的区域 ID
+- `CLOUDFLARE_API_TOKEN`，Secret，填写只读 API Token
 
 ### 第 6 步：执行数据库迁移
 
@@ -198,6 +203,7 @@ BOOTSTRAP_ADMIN_PASSWORD_PLAIN = "你的初始密码"
 - 在 Cloudflare 的 D1 控制台里执行 [migrations/0001_initial.sql](./migrations/0001_initial.sql)
 - 再执行 [migrations/0002_unique_mailbox_subdomain.sql](./migrations/0002_unique_mailbox_subdomain.sql)
 - 再执行 [migrations/0003_reuse_subdomains.sql](./migrations/0003_reuse_subdomains.sql)
+- 再执行 [migrations/0004_mailbox_groups_and_domain_health.sql](./migrations/0004_mailbox_groups_and_domain_health.sql)
 
 更稳妥的方式还是走 CLI，见下方 CLI 教程。
 
@@ -405,7 +411,7 @@ http://127.0.0.1:8787/login
 2. Create a D1 database in Cloudflare.
 3. Create an R2 bucket in Cloudflare.
 4. Edit [wrangler.toml](./wrangler.toml) in GitHub:
-   - set `BASE_DOMAIN`
+   - keep `BASE_DOMAIN = "example.com"` for a public template, or set your real domain only if the repository is private
    - set the real `database_id`
    - set `BOOTSTRAP_ADMIN_USERNAME`
    - optionally set `BOOTSTRAP_ADMIN_PASSWORD_PLAIN`
@@ -413,8 +419,13 @@ http://127.0.0.1:8787/login
 6. Verify bindings:
    - D1 binding name: `DB`
    - R2 binding name: `MAIL_BUCKET`
-7. Apply migrations.
-8. Open `/login` and sign in.
+7. Add production variables/secrets in Cloudflare Dashboard:
+   - `BASE_DOMAIN` as a plain variable
+   - `CLOUDFLARE_ZONE_ID` as a plain variable
+   - `CLOUDFLARE_API_TOKEN` as a secret
+   - `BOOTSTRAP_ADMIN_PASSWORD_PLAIN` or `BOOTSTRAP_ADMIN_PASSWORD_HASH` as a secret
+8. Apply migrations.
+9. Open `/login` and sign in.
 
 If you do not want to commit a plain password, keep the password field empty in the repo and add a Cloudflare Secret after the Worker is created.
 
@@ -468,6 +479,7 @@ Check:
 ## 8. Security notes
 
 - Do not leave a real production password in GitHub long term.
+- Do not commit a real Cloudflare API token, Zone ID, or private domain-specific value unless you are comfortable making it public.
 - Change the admin password immediately after first sign-in.
 - Prefer Cloudflare Secret for production credentials.
 - Put Cloudflare Access in front of the admin panel when possible.

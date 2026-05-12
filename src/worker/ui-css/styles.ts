@@ -416,6 +416,12 @@ export const APP_STYLES = String.raw`
         gap: 10px;
         flex-wrap: wrap;
       }
+      .inline-form {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: minmax(180px, 0.8fr) minmax(260px, 1.4fr) minmax(220px, 1fr) auto;
+        align-items: end;
+      }
       .toolbar {
         display: flex;
         gap: 12px;
@@ -930,6 +936,9 @@ export const APP_STYLES = String.raw`
           grid-template-columns: 1fr;
         }
         .control-grid {
+          grid-template-columns: 1fr;
+        }
+        .inline-form {
           grid-template-columns: 1fr;
         }
         .workspace-card__header,

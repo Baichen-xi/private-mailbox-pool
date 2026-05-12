@@ -4,10 +4,13 @@ export interface DatabaseHealth {
   subdomainVerificationStatusColumnExists: boolean;
   mailboxGroupIdColumnExists: boolean;
   mailboxGroupsTableExists: boolean;
+  mailBlockRulesTableExists: boolean;
   subdomainVerificationStatusIndexExists: boolean;
   mailboxGroupIdIndexExists: boolean;
+  mailBlockRulesTypeValueIndexExists: boolean;
+  mailBlockRulesActiveIndexExists: boolean;
   migrations: Array<{
-    id: "0001" | "0003" | "0004";
+    id: "0001" | "0003" | "0004" | "0005";
     status: "ok" | "missing" | "warning";
   }>;
   schemaReady: boolean;
@@ -62,7 +65,10 @@ export async function getDatabaseHealth(db: D1Database): Promise<DatabaseHealth>
     groupIdColumnExists,
     mailboxGroupsTableExists,
     verificationStatusIndexExists,
-    groupIdIndexExists
+    groupIdIndexExists,
+    mailBlockRulesTableExists,
+    mailBlockRulesTypeValueIndexExists,
+    mailBlockRulesActiveIndexExists
   ] = await Promise.all([
     objectExists("table", "admins"),
     objectExists("table", "sessions"),
@@ -80,7 +86,10 @@ export async function getDatabaseHealth(db: D1Database): Promise<DatabaseHealth>
     columnExists("mailboxes", "group_id"),
     objectExists("table", "mailbox_groups"),
     objectExists("index", "idx_subdomains_verification_status"),
-    objectExists("index", "idx_mailboxes_group_id")
+    objectExists("index", "idx_mailboxes_group_id"),
+    objectExists("table", "mail_block_rules"),
+    objectExists("index", "idx_mail_block_rules_type_value"),
+    objectExists("index", "idx_mail_block_rules_active")
   ]);
 
   const requiredTablesExist =
@@ -97,7 +106,8 @@ export async function getDatabaseHealth(db: D1Database): Promise<DatabaseHealth>
     auditLogsTableExists;
   const migration0003Ready = !legacyIndexExists;
   const migration0004Ready = verificationStatusColumnExists && groupIdColumnExists && mailboxGroupsTableExists;
-  const schemaReady = requiredTablesExist && migration0003Ready && migration0004Ready;
+  const migration0005Ready = mailBlockRulesTableExists;
+  const schemaReady = requiredTablesExist && migration0003Ready && migration0004Ready && migration0005Ready;
 
   return {
     legacySubdomainUniqueIndexExists: legacyIndexExists,
@@ -105,8 +115,11 @@ export async function getDatabaseHealth(db: D1Database): Promise<DatabaseHealth>
     subdomainVerificationStatusColumnExists: verificationStatusColumnExists,
     mailboxGroupIdColumnExists: groupIdColumnExists,
     mailboxGroupsTableExists,
+    mailBlockRulesTableExists,
     subdomainVerificationStatusIndexExists: verificationStatusIndexExists,
     mailboxGroupIdIndexExists: groupIdIndexExists,
+    mailBlockRulesTypeValueIndexExists,
+    mailBlockRulesActiveIndexExists,
     migrations: [
       {
         id: "0001",
@@ -120,6 +133,14 @@ export async function getDatabaseHealth(db: D1Database): Promise<DatabaseHealth>
         id: "0004",
         status: migration0004Ready
           ? verificationStatusIndexExists && groupIdIndexExists
+            ? "ok"
+            : "warning"
+          : "missing"
+      },
+      {
+        id: "0005",
+        status: migration0005Ready
+          ? mailBlockRulesTypeValueIndexExists && mailBlockRulesActiveIndexExists
             ? "ok"
             : "warning"
           : "missing"

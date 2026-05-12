@@ -35,6 +35,17 @@ import {
   updateMailboxGroup
 } from "./db/mailbox-groups";
 import {
+  createMailBlockRule,
+  deleteMailBlockRuleById,
+  evaluateMailBlockRules,
+  isValidMailBlockRuleType,
+  listActiveMailBlockRules,
+  listMailBlockRules,
+  normalizeMailBlockRuleValue,
+  recordMailBlockRuleHit,
+  type MailBlockRuleType
+} from "./db/mail-block-rules";
+import {
   createEmailRecord,
   findEmailByMailboxAndMessageId,
   getEmailById,
@@ -322,6 +333,26 @@ const translations = {
     adminRecentLoginsEmpty: "No login attempts recorded yet.",
     adminRecentAuditLogs: "Recent activity",
     adminRecentAuditLogsEmpty: "No audit activity recorded yet.",
+    mailBlockRules: "Mail block rules",
+    mailBlockRulesBody: "Reject obvious spam before it is stored. Rules match sender address, sender domain, subject keywords, or attachment types.",
+    mailBlockRulesEmpty: "No mail block rules yet.",
+    mailBlockRuleType: "Rule type",
+    mailBlockRuleValue: "Match value",
+    mailBlockRuleNote: "Note",
+    mailBlockRuleHits: "Hits",
+    mailBlockRuleLastHit: "Last hit",
+    addMailBlockRule: "Add rule",
+    deleteMailBlockRule: "Delete rule",
+    mailBlockRuleCreated: "Mail block rule added.",
+    mailBlockRuleDeleted: "Mail block rule deleted.",
+    mailBlockRuleInvalid: "Choose a rule type and enter a match value.",
+    mailBlockRuleConflict: "This rule already exists.",
+    mailBlockRuleSchemaMissing: "Apply migration 0005 before managing mail block rules.",
+    ruleTypeSenderEmail: "Sender email",
+    ruleTypeSenderDomain: "Sender domain",
+    ruleTypeSubjectKeyword: "Subject keyword",
+    ruleTypeAttachmentType: "Attachment type",
+    mailBlockValuePlaceholder: "bad@example.com, example.com, invoice, .zip, application/zip, image/*",
     suspiciousLoginIps: "Suspicious IPs",
     suspiciousLoginIpsEmpty: "No suspicious IPs currently need attention.",
     systemHealth: "System health",
@@ -353,6 +384,10 @@ const translations = {
     migration0004Ok: "Mailbox groups and domain verification columns exist.",
     migration0004Warning: "0004 core columns exist, but one or more helper indexes are missing.",
     migration0004Missing: "Apply 0004_mailbox_groups_and_domain_health.sql before using groups or domain verification.",
+    migration0005Title: "0005 mail block rules",
+    migration0005Ok: "Mail block rules are ready.",
+    migration0005Warning: "Mail block rules exist, but one or more helper indexes are missing.",
+    migration0005Missing: "Apply 0005_mail_block_rules.sql before using spam and blacklist rules.",
     adminCount: "Admins",
     activeSessions: "Active sessions",
     failedLogins24h: "Failed logins (24h)",
@@ -699,6 +734,26 @@ const translations = {
     adminRecentLoginsEmpty: "暂时还没有登录尝试记录。",
     adminRecentAuditLogs: "最近操作记录",
     adminRecentAuditLogsEmpty: "暂时还没有审计记录。",
+    mailBlockRules: "邮件拦截规则",
+    mailBlockRulesBody: "在邮件写入存储前拒收明显垃圾邮件。可按发件邮箱、发件域名、主题关键词或附件类型匹配。",
+    mailBlockRulesEmpty: "暂时还没有邮件拦截规则。",
+    mailBlockRuleType: "规则类型",
+    mailBlockRuleValue: "匹配内容",
+    mailBlockRuleNote: "备注",
+    mailBlockRuleHits: "命中次数",
+    mailBlockRuleLastHit: "最后命中",
+    addMailBlockRule: "添加规则",
+    deleteMailBlockRule: "删除规则",
+    mailBlockRuleCreated: "邮件拦截规则已添加。",
+    mailBlockRuleDeleted: "邮件拦截规则已删除。",
+    mailBlockRuleInvalid: "请选择规则类型并填写匹配内容。",
+    mailBlockRuleConflict: "这条规则已经存在。",
+    mailBlockRuleSchemaMissing: "请先执行 0005 迁移，再管理邮件拦截规则。",
+    ruleTypeSenderEmail: "发件邮箱",
+    ruleTypeSenderDomain: "发件域名",
+    ruleTypeSubjectKeyword: "主题关键词",
+    ruleTypeAttachmentType: "附件类型",
+    mailBlockValuePlaceholder: "bad@example.com、example.com、发票、.zip、application/zip、image/*",
     suspiciousLoginIps: "异常登录 IP",
     suspiciousLoginIpsEmpty: "当前没有需要处理的异常 IP。",
     systemHealth: "系统健康状态",
@@ -729,6 +784,10 @@ const translations = {
     migration0004Ok: "邮箱分组和域名验证字段已存在。",
     migration0004Warning: "0004 核心字段已存在，但有辅助索引缺失。",
     migration0004Missing: "使用分组或域名验证前，请执行 0004_mailbox_groups_and_domain_health.sql。",
+    migration0005Title: "0005 邮件拦截规则",
+    migration0005Ok: "邮件拦截规则表已就绪。",
+    migration0005Warning: "邮件拦截规则表已存在，但有辅助索引缺失。",
+    migration0005Missing: "使用垃圾邮件/黑名单规则前，请执行 0005_mail_block_rules.sql。",
     adminCount: "管理员数量",
     activeSessions: "活跃会话",
     failedLogins24h: "24 小时失败登录",
@@ -908,6 +967,14 @@ function isMailboxAddressConflictError(message: string): boolean {
     normalized.includes("unique constraint failed: mailboxes.full_address") ||
     normalized.includes("unique constraint failed: mailboxes.local_part, mailboxes.subdomain_id")
   );
+}
+
+function isMailBlockRuleSchemaMissingError(message: string): boolean {
+  return /no such table: mail_block_rules/i.test(message);
+}
+
+function isMailBlockRuleConflictError(message: string): boolean {
+  return message.toLowerCase().includes("unique constraint failed: mail_block_rules.rule_type, mail_block_rules.value");
 }
 
 function resolveLocale(request: Request): Locale {
@@ -1278,6 +1345,51 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
 
           <div class="card">
             <div class="row row--start">
+              <div>
+                <h2>${t(locale, "mailBlockRules")}</h2>
+                <p class="muted">${t(locale, "mailBlockRulesBody")}</p>
+              </div>
+            </div>
+            <form id="mail-block-rule-form" class="inline-form">
+              <label>
+                ${t(locale, "mailBlockRuleType")}
+                <select name="ruleType" required>
+                  <option value="sender_email">${t(locale, "ruleTypeSenderEmail")}</option>
+                  <option value="sender_domain">${t(locale, "ruleTypeSenderDomain")}</option>
+                  <option value="subject_keyword">${t(locale, "ruleTypeSubjectKeyword")}</option>
+                  <option value="attachment_type">${t(locale, "ruleTypeAttachmentType")}</option>
+                </select>
+              </label>
+              <label>
+                ${t(locale, "mailBlockRuleValue")}
+                <input name="value" maxlength="160" placeholder="${t(locale, "mailBlockValuePlaceholder")}" required />
+              </label>
+              <label>
+                ${t(locale, "mailBlockRuleNote")}
+                <input name="note" maxlength="140" />
+              </label>
+              <button type="submit">${t(locale, "addMailBlockRule")}</button>
+            </form>
+            <div class="workspace-table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>${t(locale, "mailBlockRuleType")}</th>
+                    <th>${t(locale, "mailBlockRuleValue")}</th>
+                    <th>${t(locale, "mailBlockRuleHits")}</th>
+                    <th>${t(locale, "mailBlockRuleLastHit")}</th>
+                    <th>${t(locale, "mailBlockRuleNote")}</th>
+                    <th>${t(locale, "action")}</th>
+                  </tr>
+                </thead>
+                <tbody id="mail-block-rule-rows"></tbody>
+              </table>
+            </div>
+            <div id="mail-block-rule-empty" class="empty empty--center" hidden>${t(locale, "mailBlockRulesEmpty")}</div>
+          </div>
+
+          <div class="card">
+            <div class="row row--start">
               <h2>${t(locale, "adminRecentSessions")}</h2>
             </div>
             <div class="workspace-table-wrap">
@@ -1433,6 +1545,21 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         migration0004Ok: ${JSON.stringify(t(locale, "migration0004Ok"))},
         migration0004Warning: ${JSON.stringify(t(locale, "migration0004Warning"))},
         migration0004Missing: ${JSON.stringify(t(locale, "migration0004Missing"))},
+        migration0005Title: ${JSON.stringify(t(locale, "migration0005Title"))},
+        migration0005Ok: ${JSON.stringify(t(locale, "migration0005Ok"))},
+        migration0005Warning: ${JSON.stringify(t(locale, "migration0005Warning"))},
+        migration0005Missing: ${JSON.stringify(t(locale, "migration0005Missing"))},
+        mailBlockRulesEmpty: ${JSON.stringify(t(locale, "mailBlockRulesEmpty"))},
+        mailBlockRuleCreated: ${JSON.stringify(t(locale, "mailBlockRuleCreated"))},
+        mailBlockRuleDeleted: ${JSON.stringify(t(locale, "mailBlockRuleDeleted"))},
+        mailBlockRuleInvalid: ${JSON.stringify(t(locale, "mailBlockRuleInvalid"))},
+        mailBlockRuleConflict: ${JSON.stringify(t(locale, "mailBlockRuleConflict"))},
+        mailBlockRuleSchemaMissing: ${JSON.stringify(t(locale, "mailBlockRuleSchemaMissing"))},
+        deleteMailBlockRule: ${JSON.stringify(t(locale, "deleteMailBlockRule"))},
+        ruleTypeSenderEmail: ${JSON.stringify(t(locale, "ruleTypeSenderEmail"))},
+        ruleTypeSenderDomain: ${JSON.stringify(t(locale, "ruleTypeSenderDomain"))},
+        ruleTypeSubjectKeyword: ${JSON.stringify(t(locale, "ruleTypeSubjectKeyword"))},
+        ruleTypeAttachmentType: ${JSON.stringify(t(locale, "ruleTypeAttachmentType"))},
         confirmDialogDeleteTitle: ${JSON.stringify(t(locale, "confirmDialogDeleteTitle"))},
         confirmDialogCleanupTitle: ${JSON.stringify(t(locale, "confirmDialogCleanupTitle"))},
         confirmDialogCancel: ${JSON.stringify(t(locale, "confirmDialogCancel"))},
@@ -1459,6 +1586,9 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
       const passwordForm = document.getElementById("password-form");
       const suspiciousIpRows = document.getElementById("suspicious-ip-rows");
       const suspiciousIpEmpty = document.getElementById("suspicious-ip-empty");
+      const mailBlockRuleForm = document.getElementById("mail-block-rule-form");
+      const mailBlockRuleRows = document.getElementById("mail-block-rule-rows");
+      const mailBlockRuleEmpty = document.getElementById("mail-block-rule-empty");
       const sessionRows = document.getElementById("session-rows");
       const sessionEmpty = document.getElementById("session-empty");
       const loginAttemptRows = document.getElementById("login-attempt-rows");
@@ -1522,14 +1652,32 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
             detail: item.status === "ok" ? text.migration0003Ok : text.migration0003Missing
           };
         }
+        if (item.id === "0004") {
+          return {
+            title: text.migration0004Title,
+            detail: item.status === "ok"
+              ? text.migration0004Ok
+              : item.status === "warning"
+                ? text.migration0004Warning
+                : text.migration0004Missing
+          };
+        }
         return {
-          title: text.migration0004Title,
+          title: text.migration0005Title,
           detail: item.status === "ok"
-            ? text.migration0004Ok
+            ? text.migration0005Ok
             : item.status === "warning"
-              ? text.migration0004Warning
-              : text.migration0004Missing
+              ? text.migration0005Warning
+              : text.migration0005Missing
         };
+      }
+
+      function ruleTypeLabel(ruleType) {
+        if (ruleType === "sender_email") return text.ruleTypeSenderEmail;
+        if (ruleType === "sender_domain") return text.ruleTypeSenderDomain;
+        if (ruleType === "subject_keyword") return text.ruleTypeSubjectKeyword;
+        if (ruleType === "attachment_type") return text.ruleTypeAttachmentType;
+        return ruleType;
       }
 
       function baseDomainHealthMessage(source) {
@@ -1803,6 +1951,76 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         await loadAdminPanel();
       });
 
+      mailBlockRuleForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearMessage();
+        const formData = new FormData(mailBlockRuleForm);
+        const ruleType = String(formData.get("ruleType") ?? "");
+        const value = String(formData.get("value") ?? "").trim();
+        const note = String(formData.get("note") ?? "").trim();
+        if (!ruleType || !value) {
+          showMessage("reminder", text.mailBlockRuleInvalid);
+          return;
+        }
+
+        const response = await fetch("/api/admin/mail-block-rules?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-app-language": currentLang
+          },
+          body: JSON.stringify({ ruleType, value, note })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          const code = payload.error?.code;
+          showMessage(code === "MAIL_BLOCK_RULE_CONFLICT" || code === "MAIL_BLOCK_RULE_SCHEMA_MISSING" ? "reminder" : "error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        mailBlockRuleForm.reset();
+        showMessage("success", text.mailBlockRuleCreated);
+        await loadAdminPanel();
+      });
+
+      mailBlockRuleRows.addEventListener("click", async (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const button = target.closest("[data-delete-mail-block-rule]");
+        if (!(button instanceof HTMLButtonElement)) {
+          return;
+        }
+        const ruleId = button.getAttribute("data-delete-mail-block-rule");
+        if (!ruleId) {
+          return;
+        }
+
+        const confirmed = await openConfirmDialog({
+          eyebrow: text.confirmDialogDeleteTitle,
+          title: text.deleteMailBlockRule,
+          message: text.confirmDialogIrreversible,
+          confirmLabel: text.confirmDialogDeleteAction
+        });
+        if (!confirmed) {
+          return;
+        }
+
+        const response = await fetch("/api/admin/mail-block-rules/" + encodeURIComponent(ruleId) + "/delete?lang=" + encodeURIComponent(currentLang), {
+          method: "POST",
+          headers: { "x-app-language": currentLang }
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return;
+        }
+
+        showMessage("success", text.mailBlockRuleDeleted);
+        await loadAdminPanel();
+      });
+
       async function loadAdminPanel() {
         const response = await fetch("/api/admin/overview?lang=" + encodeURIComponent(currentLang), {
           headers: { "x-app-language": currentLang }
@@ -1860,6 +2078,23 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
               '<td><span class="mono">' + escapeHtml(formatDate(item.lastAttemptAt)) + '</span></td>' +
               '<td><span class="table-preview">' + escapeHtml(item.usernames || text.notAvailable) + '</span></td>' +
               '<td><button class="secondary" type="button" data-clear-ip="' + escapeHtml(item.ipAddress) + '">' + escapeHtml(text.clearIpAttemptsAction) + '</button></td>' +
+            '</tr>'
+          )).join("");
+        }
+
+        if (!payload.mailBlockRules || payload.mailBlockRules.length === 0) {
+          mailBlockRuleRows.innerHTML = "";
+          mailBlockRuleEmpty.hidden = false;
+        } else {
+          mailBlockRuleEmpty.hidden = true;
+          mailBlockRuleRows.innerHTML = payload.mailBlockRules.map((rule) => (
+            '<tr>' +
+              '<td><span class="badge">' + escapeHtml(ruleTypeLabel(rule.ruleType)) + '</span></td>' +
+              '<td><code>' + escapeHtml(rule.value) + '</code></td>' +
+              '<td><span class="mono">' + escapeHtml(String(rule.hitCount)) + '</span></td>' +
+              '<td><span class="mono">' + escapeHtml(formatDate(rule.lastHitAt)) + '</span></td>' +
+              '<td><span class="table-preview">' + escapeHtml(rule.note || text.notAvailable) + '</span></td>' +
+              '<td><button class="secondary" type="button" data-delete-mail-block-rule="' + escapeHtml(rule.id) + '">' + escapeHtml(text.deleteMailBlockRule) + '</button></td>' +
             '</tr>'
           )).join("");
         }
@@ -5238,14 +5473,24 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
     return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
   }
 
-  const [stats, admins, recentSessions, recentLoginAttempts, recentAuditLogs, suspiciousLoginIps, databaseHealth] = await Promise.all([
+  const [
+    stats,
+    admins,
+    recentSessions,
+    recentLoginAttempts,
+    recentAuditLogs,
+    suspiciousLoginIps,
+    databaseHealth,
+    mailBlockRules
+  ] = await Promise.all([
     getAdminPanelStats(env.DB),
     listAdminSummaries(env.DB, 12),
     listRecentSessions(env.DB, 8),
     listRecentLoginAttempts(env.DB, 10),
     listRecentAuditLogs(env.DB, 10),
     listSuspiciousLoginIps(env.DB, 24, 3, 12),
-    getDatabaseHealth(env.DB)
+    getDatabaseHealth(env.DB),
+    listMailBlockRules(env.DB, 50)
   ]);
   const baseDomainInfo = await resolveBaseDomainInfo(request, env);
   const cloudflareApiConfigured = Boolean(env.CLOUDFLARE_API_TOKEN?.trim() && env.CLOUDFLARE_ZONE_ID?.trim());
@@ -5307,6 +5552,15 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
       failedCount: item.failed_count,
       lastAttemptAt: item.last_attempt_at,
       usernames: item.usernames ? item.usernames.split(",").map((value) => value.trim()).filter(Boolean).join(", ") : ""
+    })),
+    mailBlockRules: mailBlockRules.map((item) => ({
+      id: item.id,
+      ruleType: item.rule_type,
+      value: item.value,
+      note: item.note,
+      hitCount: Number(item.hit_count ?? 0),
+      lastHitAt: item.last_hit_at,
+      createdAt: item.created_at
     })),
     recentAuditLogs: recentAuditLogs.map((item) => ({
       action: item.action,
@@ -5456,6 +5710,96 @@ async function handleAdminLoginAttemptsClear(request: Request, env: Env): Promis
     ok: true,
     clearedCount
   });
+}
+
+async function handleMailBlockRuleCreateApi(request: Request, env: Env): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  const body = await parseJsonBody(request);
+  const rawRuleType = String(body.ruleType ?? "");
+  if (!isValidMailBlockRuleType(rawRuleType)) {
+    return errorResponse(400, "INVALID_MAIL_BLOCK_RULE", t(locale, "mailBlockRuleInvalid"));
+  }
+
+  const ruleType: MailBlockRuleType = rawRuleType;
+  const value = normalizeMailBlockRuleValue(ruleType, String(body.value ?? ""));
+  const note = String(body.note ?? "").trim().slice(0, 140) || null;
+  if (!value || value.length > 160) {
+    return errorResponse(400, "INVALID_MAIL_BLOCK_RULE", t(locale, "mailBlockRuleInvalid"));
+  }
+
+  try {
+    const rule = await createMailBlockRule(env.DB, { ruleType, value, note });
+    await writeAuditLog(env.DB, {
+      actorType: "admin",
+      actorId: admin.adminId,
+      action: "mail_block_rule.created",
+      targetType: "mail_block_rule",
+      targetId: rule.id,
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get("user-agent"),
+      metadata: { ruleType, value, note }
+    });
+
+    return json({ rule: { id: rule.id, ruleType, value, note } }, { status: 201 });
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (isMailBlockRuleSchemaMissingError(message)) {
+      return errorResponse(409, "MAIL_BLOCK_RULE_SCHEMA_MISSING", t(locale, "mailBlockRuleSchemaMissing"));
+    }
+    if (isMailBlockRuleConflictError(message)) {
+      return errorResponse(409, "MAIL_BLOCK_RULE_CONFLICT", t(locale, "mailBlockRuleConflict"));
+    }
+    console.error("Mail block rule creation failed", { message });
+    return errorResponse(500, "MAIL_BLOCK_RULE_CREATE_FAILED", t(locale, "unexpectedError"));
+  }
+}
+
+async function handleMailBlockRuleDeleteApi(
+  request: Request,
+  env: Env,
+  ruleId: string
+): Promise<Response> {
+  const locale = resolveLocale(request);
+  const admin = await getAuthenticatedAdmin(request, env);
+  if (!admin) {
+    return errorResponse(401, "UNAUTHORIZED", t(locale, "unauthorized"));
+  }
+
+  try {
+    const deleted = await deleteMailBlockRuleById(env.DB, ruleId);
+    if (!deleted) {
+      return errorResponse(404, "MAIL_BLOCK_RULE_NOT_FOUND", t(locale, "unexpectedError"));
+    }
+
+    await writeAuditLog(env.DB, {
+      actorType: "admin",
+      actorId: admin.adminId,
+      action: "mail_block_rule.deleted",
+      targetType: "mail_block_rule",
+      targetId: ruleId,
+      ipAddress: getClientIp(request),
+      userAgent: request.headers.get("user-agent"),
+      metadata: {
+        ruleType: deleted.rule_type,
+        value: deleted.value,
+        hitCount: deleted.hit_count
+      }
+    });
+
+    return json({ ok: true });
+  } catch (error) {
+    const message = getErrorMessage(error);
+    if (isMailBlockRuleSchemaMissingError(message)) {
+      return errorResponse(409, "MAIL_BLOCK_RULE_SCHEMA_MISSING", t(locale, "mailBlockRuleSchemaMissing"));
+    }
+    console.error("Mail block rule delete failed", { message });
+    return errorResponse(500, "MAIL_BLOCK_RULE_DELETE_FAILED", t(locale, "unexpectedError"));
+  }
 }
 
 async function handleMaintenanceRunApi(request: Request, env: Env): Promise<Response> {
@@ -6705,6 +7049,33 @@ async function handleInboundEmail(message: ForwardableEmailMessage, env: Env): P
     return;
   }
 
+  const activeBlockRules = await listActiveMailBlockRules(env.DB);
+  const senderRuleMatch = evaluateMailBlockRules(activeBlockRules, {
+    fromAddress,
+    subject: null,
+    attachments: []
+  });
+  if (senderRuleMatch) {
+    message.setReject("Message rejected by mail block rules.");
+    await recordMailBlockRuleHit(env.DB, senderRuleMatch.rule.id);
+    await writeAuditLog(env.DB, {
+      actorType: "system",
+      actorId: null,
+      action: "email.rejected_block_rule",
+      targetType: "mailbox",
+      targetId: mailbox.id,
+      metadata: {
+        toAddress,
+        fromAddress,
+        ruleId: senderRuleMatch.rule.id,
+        ruleType: senderRuleMatch.rule.rule_type,
+        ruleValue: senderRuleMatch.rule.value,
+        reason: senderRuleMatch.reason
+      }
+    });
+    return;
+  }
+
   try {
     const rawEmail = await new Response(message.raw).arrayBuffer();
     const parsed = await PostalMime.parse(rawEmail, {
@@ -6736,6 +7107,37 @@ async function handleInboundEmail(message: ForwardableEmailMessage, env: Env): P
         }
       : { name: null, address: fromAddress };
     const replyTo = getFirstMailbox(parsed.replyTo);
+    const contentRuleMatch = evaluateMailBlockRules(activeBlockRules, {
+      fromAddress: fromHeader.address ?? fromAddress,
+      subject: parsed.subject?.trim() || null,
+      attachments: parsed.attachments.map((attachment) => ({
+        filename: attachment.filename || null,
+        mimeType: attachment.mimeType || null
+      }))
+    });
+    if (contentRuleMatch) {
+      message.setReject("Message rejected by mail block rules.");
+      await recordMailBlockRuleHit(env.DB, contentRuleMatch.rule.id);
+      await writeAuditLog(env.DB, {
+        actorType: "system",
+        actorId: null,
+        action: "email.rejected_block_rule",
+        targetType: "mailbox",
+        targetId: mailbox.id,
+        metadata: {
+          toAddress,
+          fromAddress: fromHeader.address ?? fromAddress,
+          subject: parsed.subject?.trim() || null,
+          ruleId: contentRuleMatch.rule.id,
+          ruleType: contentRuleMatch.rule.rule_type,
+          ruleValue: contentRuleMatch.rule.value,
+          reason: contentRuleMatch.reason,
+          attachmentCount: parsed.attachments.length
+        }
+      });
+      return;
+    }
+
     const textBodyR2Key = parsed.text ? `${buildEmailStoragePrefix(mailbox.id, emailId, receivedAt)}/body.txt` : null;
     const htmlBodyR2Key = parsed.html ? `${buildEmailStoragePrefix(mailbox.id, emailId, receivedAt)}/body.html` : null;
 
@@ -6869,6 +7271,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/emails\/delete$/) : null;
   const adminSessionRevokeMatch =
     request.method === "POST" ? url.pathname.match(/^\/api\/admin\/sessions\/([^/]+)\/revoke$/) : null;
+  const mailBlockRuleDeleteMatch =
+    request.method === "POST" ? url.pathname.match(/^\/api\/admin\/mail-block-rules\/([^/]+)\/delete$/) : null;
   const mailboxDeleteMatch =
     request.method === "POST" ? url.pathname.match(/^\/api\/mailboxes\/([^/]+)\/delete$/) : null;
   const mailboxMetadataMatch =
@@ -6947,6 +7351,14 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (request.method === "POST" && url.pathname === "/api/admin/login-attempts/clear") {
     return handleAdminLoginAttemptsClear(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/admin/mail-block-rules") {
+    return handleMailBlockRuleCreateApi(request, env);
+  }
+
+  if (mailBlockRuleDeleteMatch) {
+    return handleMailBlockRuleDeleteApi(request, env, mailBlockRuleDeleteMatch[1]);
   }
 
   if (request.method === "POST" && url.pathname === "/api/maintenance/run") {

@@ -204,6 +204,7 @@ BOOTSTRAP_ADMIN_PASSWORD_PLAIN = "你的初始密码"
 - 再执行 [migrations/0002_unique_mailbox_subdomain.sql](./migrations/0002_unique_mailbox_subdomain.sql)
 - 再执行 [migrations/0003_reuse_subdomains.sql](./migrations/0003_reuse_subdomains.sql)
 - 再执行 [migrations/0004_mailbox_groups_and_domain_health.sql](./migrations/0004_mailbox_groups_and_domain_health.sql)
+- 再执行 [migrations/0005_mail_block_rules.sql](./migrations/0005_mail_block_rules.sql)
 
 更稳妥的方式还是走 CLI，见下方 CLI 教程。
 
@@ -489,6 +490,7 @@ Check:
 - [Docs index](./docs/README.md)
 - [Schema](./docs/schema.sql)
 - [Migration 0001](./migrations/0001_initial.sql)
+- [Migration 0005](./migrations/0005_mail_block_rules.sql)
 - [Chinese dashboard deployment guide](./docs/zh/cloudflare-dashboard-deploy-step-by-step.md)
 
 ## 10. Official references

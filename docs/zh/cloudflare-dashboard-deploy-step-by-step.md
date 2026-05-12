@@ -262,6 +262,13 @@ migrations/0001_initial.sql
 
 把 `0001_initial.sql` 的全部内容粘进去，然后执行。
 
+如果你是从零部署，继续按顺序执行：
+
+- `migrations/0002_unique_mailbox_subdomain.sql`
+- `migrations/0003_reuse_subdomains.sql`
+- `migrations/0004_mailbox_groups_and_domain_health.sql`
+- `migrations/0005_mail_block_rules.sql`
+
 ### 3. 为什么这一步必须做
 
 因为这个 SQL 会创建项目需要的所有核心表，比如：

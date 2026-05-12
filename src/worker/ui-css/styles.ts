@@ -150,6 +150,14 @@ export const APP_STYLES = String.raw`
         outline: none;
         box-shadow: 0 0 0 3px rgba(21, 111, 91, 0.14);
       }
+      input[type="color"] {
+        appearance: auto;
+        width: 58px;
+        min-width: 58px;
+        height: 42px;
+        padding: 4px;
+        cursor: pointer;
+      }
       textarea {
         min-height: 96px;
         resize: vertical;
@@ -353,6 +361,14 @@ export const APP_STYLES = String.raw`
       }
       .notice--reminder .notice__eyebrow {
         color: #8a661f;
+      }
+      .notice--floating {
+        position: fixed;
+        top: 18px;
+        right: 18px;
+        z-index: 80;
+        width: min(420px, calc(100vw - 28px));
+        box-shadow: 0 18px 44px rgba(27, 33, 35, 0.16);
       }
       .muted {
         color: var(--muted);
@@ -559,6 +575,7 @@ export const APP_STYLES = String.raw`
       .badge {
         display: inline-flex;
         align-items: center;
+        gap: 6px;
         padding: 5px 9px;
         border-radius: 999px;
         border: 1px solid rgba(21, 111, 91, 0.14);
@@ -566,6 +583,33 @@ export const APP_STYLES = String.raw`
         color: var(--accent-strong);
         font-size: 12px;
         line-height: 1.2;
+      }
+      .badge--group {
+        --group-color: var(--accent);
+        border-color: color-mix(in srgb, var(--group-color) 34%, transparent);
+        background: color-mix(in srgb, var(--group-color) 11%, white);
+        color: var(--text);
+      }
+      .badge--button {
+        width: fit-content;
+        min-height: 30px;
+        cursor: pointer;
+      }
+      .badge--button:hover {
+        border-color: color-mix(in srgb, var(--group-color) 56%, transparent);
+        background: color-mix(in srgb, var(--group-color) 16%, white);
+      }
+      .badge--button.is-active {
+        border-color: color-mix(in srgb, var(--group-color) 72%, transparent);
+        background: color-mix(in srgb, var(--group-color) 22%, white);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--group-color) 12%, transparent);
+      }
+      .badge-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: var(--group-color);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--group-color) 16%, white);
       }
       .badge-row {
         display: flex;

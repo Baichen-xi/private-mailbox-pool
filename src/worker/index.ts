@@ -2185,7 +2185,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           </div>
         </div>
         <div class="content stack">
-          <div id="page-message" class="notice" hidden></div>
+          <div id="page-message" class="notice notice--floating" hidden></div>
 
           <div class="summary-grid">
             <div class="card">
@@ -2608,22 +2608,28 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       let currentMailboxPage = 1;
       let currentSubdomainPage = 1;
       let pendingConfirmResolver = null;
+      let messageTimer = 0;
 
       function showMessage(kind, value) {
+        window.clearTimeout(messageTimer);
         const palette = kind === "success"
-          ? { eyebrow: text.noticeSuccessEyebrow, title: text.noticeSuccessTitle, className: "notice notice--success" }
+          ? { eyebrow: text.noticeSuccessEyebrow, title: text.noticeSuccessTitle, className: "notice notice--floating notice--success" }
           : kind === "reminder"
-            ? { eyebrow: text.noticeReminderEyebrow, title: text.noticeReminderTitle, className: "notice notice--reminder" }
-            : { eyebrow: text.noticeErrorEyebrow, title: text.noticeErrorTitle, className: "notice notice--error" };
+            ? { eyebrow: text.noticeReminderEyebrow, title: text.noticeReminderTitle, className: "notice notice--floating notice--reminder" }
+            : { eyebrow: text.noticeErrorEyebrow, title: text.noticeErrorTitle, className: "notice notice--floating notice--error" };
         pageMessage.hidden = false;
         pageMessage.className = palette.className;
         pageMessage.innerHTML =
           '<p class="notice__eyebrow">' + escapeHtml(palette.eyebrow) + '</p>' +
           '<p class="notice__title">' + escapeHtml(palette.title) + '</p>' +
           '<p class="notice__body">' + escapeHtml(value) + '</p>';
+        messageTimer = window.setTimeout(() => {
+          clearMessage();
+        }, kind === "error" ? 7000 : 4200);
       }
 
       function clearMessage() {
+        window.clearTimeout(messageTimer);
         pageMessage.hidden = true;
         pageMessage.innerHTML = "";
       }
@@ -2640,6 +2646,22 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           .replaceAll(">", "&gt;")
           .replaceAll('"', "&quot;")
           .replaceAll("'", "&#39;");
+      }
+
+      function normalizeUiColor(value) {
+        const color = String(value || "").trim();
+        return /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#156f5b";
+      }
+
+      function groupBadgeHtml(groupName, groupColor) {
+        if (!groupName) {
+          return '<span class="badge">' + escapeHtml(text.noGroupOption) + '</span>';
+        }
+        const color = normalizeUiColor(groupColor);
+        return '<span class="badge badge--group" style="--group-color: ' + escapeHtml(color) + '">' +
+          '<span class="badge-dot" aria-hidden="true"></span>' +
+          escapeHtml(groupName) +
+        '</span>';
       }
 
       function formatPageIndicator(current, total) {
@@ -2867,7 +2889,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               '</a>' +
             '</td>' +
             '<td><span class="badge">' + (text.status[item.status] || item.status) + '</span></td>' +
-            '<td><span class="badge">' + escapeHtml(item.groupName || text.noGroupOption) + '</span></td>' +
+            '<td>' + groupBadgeHtml(item.groupName, item.groupColor) + '</td>' +
             '<td><span class="table-preview">' + escapeHtml(item.note || text.noNote) + '</span></td>' +
             '<td><span class="mono">' + formatDate(item.createdAt) + '</span></td>' +
           '</tr>'
@@ -2976,7 +2998,10 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
               '<span>' + escapeHtml(text.groupColor) + '</span>' +
               '<input type="color" name="color" value="' + escapeHtml(group.color || '#156f5b') + '" />' +
             '</label>' +
-            '<span class="badge">' + escapeHtml(String(group.mailboxCount || 0)) + ' ' + escapeHtml(text.mailboxCountLabel) + '</span>' +
+            '<button class="badge badge--group badge--button' + (selectedGroupId === group.id ? ' is-active' : '') + '" style="--group-color: ' + escapeHtml(normalizeUiColor(group.color)) + '" type="button" data-view-group-id="' + escapeHtml(group.id) + '">' +
+              '<span class="badge-dot" aria-hidden="true"></span>' +
+              escapeHtml(String(group.mailboxCount || 0)) + ' ' + escapeHtml(text.mailboxCountLabel) +
+            '</button>' +
             '<div class="inline-actions">' +
               '<button type="submit">' + escapeHtml(text.saveGroup) + '</button>' +
               '<button class="secondary" type="button" data-delete-group-id="' + escapeHtml(group.id) + '" ' + ((group.mailboxCount || 0) > 0 ? 'disabled' : '') + '>' +
@@ -3015,7 +3040,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
           '<option value="all">' + escapeHtml(text.allGroups) + '</option>',
           '<option value="">' + escapeHtml(text.noGroupOption) + '</option>',
           ...allGroups.map((group) => (
-            '<option value="' + escapeHtml(group.id) + '">' + escapeHtml(group.name) + ' (' + (group.mailboxCount || 0) + ')</option>'
+            '<option value="' + escapeHtml(group.id) + '"' + (group.id === currentFilterValue ? ' selected' : '') + '>' + escapeHtml(group.name) + ' (' + (group.mailboxCount || 0) + ')</option>'
           ))
         ].join("");
         groupFilterSelect.value = currentFilterValue;
@@ -3242,6 +3267,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
 
         const payload = metadataPayload;
         showMessage("success", text.mailboxUpdatedSuccess.replace("{address}", payload.mailbox.fullAddress || mailbox.fullAddress));
+        selectedMailboxId = "";
         await loadData();
       });
 
@@ -3645,6 +3671,22 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       groupManagementList.addEventListener("click", async (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) {
+          return;
+        }
+        const viewButton = target.closest("[data-view-group-id]");
+        if (viewButton instanceof HTMLButtonElement) {
+          const groupId = viewButton.getAttribute("data-view-group-id");
+          if (!groupId) {
+            return;
+          }
+          selectedGroupId = groupId;
+          selectedSubdomainId = "all";
+          selectedMailboxId = "";
+          currentMailboxPage = 1;
+          renderGroupControls();
+          renderSubdomainList();
+          renderMailboxTable();
+          mailboxRows.closest(".workspace-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
           return;
         }
         const button = target.closest("[data-delete-group-id]");

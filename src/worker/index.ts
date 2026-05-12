@@ -2,7 +2,7 @@
 import type { Env } from "./env";
 import { parseJsonBody } from "./api/body";
 import { getBooleanVar, getNumberVar } from "./env";
-import { htmlToReadableText, sanitizeHtmlEmail, wrapSanitizedHtmlDocument } from "./html-sanitizer/email";
+import { htmlHasRemoteImages, htmlToReadableText, sanitizeHtmlEmail, wrapSanitizedHtmlDocument } from "./html-sanitizer/email";
 import { buildEmailStoragePrefix, buildPreview, resolveReceivedAt, sanitizeKeyPart, toAttachmentBytes } from "./mail/storage";
 import { renderLayout } from "./pages/layout";
 import { getAuthenticatedAdmin, createSessionCookie, clearSessionCookie } from "./auth/sessions";
@@ -267,6 +267,9 @@ const translations = {
     viewText: "Text",
     previewImage: "Image preview",
     inlineImagesAllowed: "Inline images from this email only",
+    remoteImagesBlocked: "Remote images are blocked by default to reduce sender tracking.",
+    showRemoteImages: "Show remote images",
+    remoteImagesShown: "Remote images are visible for this message.",
     downloadRawEmail: "Download raw email",
     attachmentList: "Attachments",
     noAttachments: "No attachments",
@@ -668,6 +671,9 @@ const translations = {
     viewText: "文本",
     previewImage: "图片预览",
     inlineImagesAllowed: "仅允许这封邮件自己的内联图片",
+    remoteImagesBlocked: "已默认屏蔽远程图片，以减少发件方追踪。",
+    showRemoteImages: "显示远程图片",
+    remoteImagesShown: "这封邮件的远程图片已显示。",
     downloadRawEmail: "下载原始邮件",
     attachmentList: "附件列表",
     noAttachments: "没有附件",
@@ -4497,6 +4503,7 @@ function renderEmailDetailPage(
                   <button id="mode-html-button" class="secondary" type="button">${t(locale, "viewHtml")}</button>
                   <button id="mode-text-button" class="secondary" type="button">${t(locale, "viewText")}</button>
                 </div>
+                <button id="remote-images-button" class="secondary" type="button" hidden>${t(locale, "showRemoteImages")}</button>
                 <button id="refresh-button" class="secondary" type="button">${t(locale, "refreshData")}</button>
               </div>
               <p id="body-source" class="muted body-source"></p>
@@ -4525,6 +4532,9 @@ function renderEmailDetailPage(
         bodySourceHtmlSafe: ${JSON.stringify(t(locale, "bodySourceHtmlSafe"))},
         viewHtml: ${JSON.stringify(t(locale, "viewHtml"))},
         viewText: ${JSON.stringify(t(locale, "viewText"))},
+        remoteImagesBlocked: ${JSON.stringify(t(locale, "remoteImagesBlocked"))},
+        showRemoteImages: ${JSON.stringify(t(locale, "showRemoteImages"))},
+        remoteImagesShown: ${JSON.stringify(t(locale, "remoteImagesShown"))},
         downloadRawEmail: ${JSON.stringify(t(locale, "downloadRawEmail"))},
         attachmentList: ${JSON.stringify(t(locale, "attachmentList"))},
         noAttachments: ${JSON.stringify(t(locale, "noAttachments"))},
@@ -4555,6 +4565,7 @@ function renderEmailDetailPage(
       const bodyModeSwitch = document.getElementById("body-mode-switch");
       const modeHtmlButton = document.getElementById("mode-html-button");
       const modeTextButton = document.getElementById("mode-text-button");
+      const remoteImagesButton = document.getElementById("remote-images-button");
       const bodyEl = document.getElementById("email-body");
       const htmlFrameEl = document.getElementById("email-html-frame");
       const bodySourceEl = document.getElementById("body-source");
@@ -4565,6 +4576,7 @@ function renderEmailDetailPage(
       const refreshButton = document.getElementById("refresh-button");
       const logoutButton = document.getElementById("logout-button");
       let currentEmail = null;
+      let remoteImagesAllowed = false;
 
       function showMessage(kind, value) {
         const palette = kind === "success"
@@ -4636,13 +4648,17 @@ function renderEmailDetailPage(
           htmlFrameEl.hidden = false;
           bodyEl.hidden = true;
           htmlFrameEl.srcdoc = currentEmail.htmlDocument;
-          bodySourceEl.textContent = text.bodySourceHtmlSafe;
+          bodySourceEl.textContent = currentEmail.remoteImagesBlocked
+            ? (remoteImagesAllowed ? text.remoteImagesShown : text.remoteImagesBlocked)
+            : text.bodySourceHtmlSafe;
+          remoteImagesButton.hidden = remoteImagesAllowed || !currentEmail.remoteImagesBlocked;
           return;
         }
 
         htmlFrameEl.hidden = true;
         htmlFrameEl.srcdoc = "";
         bodyEl.hidden = false;
+        remoteImagesButton.hidden = true;
         bodyEl.textContent = currentEmail.bodyText || text.bodyUnavailable;
         bodySourceEl.textContent = currentEmail.bodySource === "html_fallback"
           ? text.bodySourceHtmlFallback
@@ -4661,10 +4677,16 @@ function renderEmailDetailPage(
 
       modeHtmlButton.addEventListener("click", () => setActiveMode("html"));
       modeTextButton.addEventListener("click", () => setActiveMode("text"));
+      remoteImagesButton.addEventListener("click", () => {
+        remoteImagesAllowed = true;
+        clearMessage();
+        loadEmailDetail();
+      });
 
       async function loadEmailDetail() {
+        const remoteImageQuery = remoteImagesAllowed ? "&remoteImages=1" : "";
         const response = await fetch(
-          "/api/mailboxes/" + encodeURIComponent(mailboxId) + "/emails/" + encodeURIComponent(emailId) + "?lang=" + encodeURIComponent(currentLang),
+          "/api/mailboxes/" + encodeURIComponent(mailboxId) + "/emails/" + encodeURIComponent(emailId) + "?lang=" + encodeURIComponent(currentLang) + remoteImageQuery,
           { headers: { "x-app-language": currentLang } }
         );
 
@@ -4684,6 +4706,7 @@ function renderEmailDetailPage(
           bodySourceEl.textContent = "";
           htmlFrameEl.hidden = true;
           htmlFrameEl.srcdoc = "";
+          remoteImagesButton.hidden = true;
           bodyEl.hidden = false;
           bodyEl.classList.add("is-empty-state");
           bodyEl.textContent = text.emailUnavailableBody;
@@ -6729,6 +6752,8 @@ async function handleMailboxEmailDetailApi(
   let bodyText = await readBucketText(env.MAIL_BUCKET, email.text_body_r2_key);
   let bodySource: "text" | "html_fallback" | "none" = "none";
   let htmlDocument: string | null = null;
+  let remoteImagesBlocked = false;
+  const allowRemoteImages = new URL(request.url).searchParams.get("remoteImages") === "1";
 
   if (bodyText) {
     bodySource = "text";
@@ -6736,7 +6761,8 @@ async function handleMailboxEmailDetailApi(
 
   const htmlBody = await readBucketText(env.MAIL_BUCKET, email.html_body_r2_key);
   if (htmlBody) {
-    const sanitizedHtml = sanitizeHtmlEmail(htmlBody, cidMap);
+    remoteImagesBlocked = htmlHasRemoteImages(htmlBody);
+    const sanitizedHtml = sanitizeHtmlEmail(htmlBody, cidMap, { allowRemoteImages });
     htmlDocument = wrapSanitizedHtmlDocument(sanitizedHtml);
     if (!bodyText) {
       bodyText = htmlToReadableText(htmlBody);
@@ -6764,6 +6790,8 @@ async function handleMailboxEmailDetailApi(
       bodyText,
       bodySource,
       htmlDocument,
+      remoteImagesBlocked,
+      remoteImagesAllowed: allowRemoteImages,
       rawDownloadUrl: `/api/mailboxes/${mailboxId}/emails/${emailId}/raw?lang=${locale}`,
       attachments: attachments.map((attachment) => ({
         id: attachment.id,

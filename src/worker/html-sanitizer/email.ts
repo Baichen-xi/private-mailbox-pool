@@ -53,7 +53,15 @@ function sanitizeHref(value: string | null): string | null {
   return null;
 }
 
-function sanitizeImageSrc(value: string | null, cidMap: Map<string, string>): string | null {
+interface HtmlEmailSanitizeOptions {
+  allowRemoteImages?: boolean;
+}
+
+function sanitizeImageSrc(
+  value: string | null,
+  cidMap: Map<string, string>,
+  options: HtmlEmailSanitizeOptions = {}
+): string | null {
   if (!value) {
     return null;
   }
@@ -66,6 +74,13 @@ function sanitizeImageSrc(value: string | null, cidMap: Map<string, string>): st
   if (trimmed.toLowerCase().startsWith("cid:")) {
     const cidKey = trimmed.slice(4).replace(/^<|>$/g, "").toLowerCase();
     return cidMap.get(cidKey) ?? null;
+  }
+
+  if (options.allowRemoteImages) {
+    const normalized = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, "");
+    if (/^https?:\/\//i.test(normalized)) {
+      return normalized;
+    }
   }
 
   return null;
@@ -97,6 +112,10 @@ export function htmlToReadableText(value: string): string {
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+export function htmlHasRemoteImages(value: string): boolean {
+  return /<img\b[^>]*\bsrc\s*=\s*("https?:\/\/[^"]*"|'https?:\/\/[^']*'|https?:\/\/[^\s"'=<>`]+)/i.test(value);
 }
 
 const HTML_EMAIL_ALLOWED_TAGS = new Set([
@@ -134,14 +153,18 @@ const HTML_EMAIL_ALLOWED_TAGS = new Set([
   "ul"
 ]);
 
-export function sanitizeHtmlEmail(value: string, cidMap: Map<string, string>): string {
+export function sanitizeHtmlEmail(
+  value: string,
+  cidMap: Map<string, string>,
+  options: HtmlEmailSanitizeOptions = {}
+): string {
   const withoutBlockedSections = value
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<(script|style|iframe|object|embed|form|input|button|select|textarea|video|audio|canvas|svg|math|meta|base|link|head|title|noscript)[^>]*>[\s\S]*?<\/\1>/gi, "")
     .replace(/<(script|style|iframe|object|embed|form|input|button|select|textarea|video|audio|canvas|svg|math|meta|base|link|head|title|noscript)\b[^>]*\/?>/gi, "");
 
   const withBlockedImages = withoutBlockedSections.replace(/<img\b([^>]*)\/?>/gi, (_match, rawAttributes) => {
-    const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap);
+    const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap, options);
     const altText = readTagAttribute(rawAttributes, "alt");
     if (src) {
       const altPart = altText ? ` alt="${escapeHtmlText(altText)}"` : "";
@@ -180,7 +203,7 @@ export function sanitizeHtmlEmail(value: string, cidMap: Map<string, string>): s
     }
 
     if (tagName === "img") {
-      const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap);
+      const src = sanitizeImageSrc(readTagAttribute(rawAttributes, "src"), cidMap, options);
       if (!src) {
         return "";
       }

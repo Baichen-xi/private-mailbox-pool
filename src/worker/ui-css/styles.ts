@@ -578,6 +578,10 @@ export const APP_STYLES = String.raw`
         display: grid;
         gap: 12px;
       }
+      .health-detail-list {
+        grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        gap: 10px;
+      }
       .state-panel {
         display: grid;
         gap: 10px;

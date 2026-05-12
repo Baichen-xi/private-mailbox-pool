@@ -332,7 +332,27 @@ const translations = {
     healthLegacySubdomainIndex:
       "D1 still has the old unique subdomain index. Apply migration 0003 before creating multiple mailboxes under one subdomain.",
     healthPlainPasswordWarning:
-      "Plain bootstrap password is set in this deployment. Move it to a Cloudflare Secret or use BOOTSTRAP_ADMIN_PASSWORD_HASH for production.",
+      "BOOTSTRAP_ADMIN_PASSWORD_PLAIN is still set. After the admin account exists, remove it or use BOOTSTRAP_ADMIN_PASSWORD_HASH.",
+    healthCloudflareAccessEnabled: "Cloudflare Access is enabled.",
+    healthCloudflareAccessDisabled: "Cloudflare Access is disabled. Keep the admin route private before production exposure.",
+    healthCloudflareApiConfigured: "Cloudflare API credentials are configured for DNS and Email Routing checks.",
+    healthCloudflareApiMissing: "Cloudflare API credentials are missing. DNS checks will fall back to public MX lookup only.",
+    healthBaseDomainConfigured: "Base domain is configured directly.",
+    healthBaseDomainFromHost: "Base domain is inferred from the current custom domain.",
+    healthBaseDomainFromZone: "Base domain is inferred from Cloudflare Zone API.",
+    healthBaseDomainPlaceholder: "Base domain still uses a placeholder. Set BASE_DOMAIN or configure Cloudflare API credentials.",
+    migrationStatusTitle: "Migration status",
+    migrationStatusBody: "Current D1 schema compatibility for this code version.",
+    migration0001Title: "0001 base schema",
+    migration0001Ok: "Base tables exist.",
+    migration0001Missing: "Base tables are missing. Apply 0001_initial.sql first.",
+    migration0003Title: "0003 subdomain reuse",
+    migration0003Ok: "One subdomain can hold multiple mailboxes.",
+    migration0003Missing: "Old unique subdomain index still exists. Apply 0003_reuse_subdomains.sql.",
+    migration0004Title: "0004 groups and domain health",
+    migration0004Ok: "Mailbox groups and domain verification columns exist.",
+    migration0004Warning: "0004 core columns exist, but one or more helper indexes are missing.",
+    migration0004Missing: "Apply 0004_mailbox_groups_and_domain_health.sql before using groups or domain verification.",
     adminCount: "Admins",
     activeSessions: "Active sessions",
     failedLogins24h: "Failed logins (24h)",
@@ -688,7 +708,27 @@ const translations = {
     healthSchemaOk: "D1 结构已支持同一个子域名下创建多个邮箱。",
     healthLegacySubdomainIndex: "D1 中仍存在旧的子域名唯一索引。请先应用 0003 迁移，再在同一子域名下创建多个邮箱。",
     healthPlainPasswordWarning:
-      "当前部署仍设置了明文初始密码。生产环境建议改用 Cloudflare Secret 或 BOOTSTRAP_ADMIN_PASSWORD_HASH。",
+      "当前部署仍设置了 BOOTSTRAP_ADMIN_PASSWORD_PLAIN。管理员账号已存在后，建议删除它或改用 BOOTSTRAP_ADMIN_PASSWORD_HASH。",
+    healthCloudflareAccessEnabled: "Cloudflare Access 已启用。",
+    healthCloudflareAccessDisabled: "Cloudflare Access 未启用。生产暴露前请确认管理入口有前置保护。",
+    healthCloudflareApiConfigured: "Cloudflare API 凭据已配置，可用于 DNS 和 Email Routing 检测。",
+    healthCloudflareApiMissing: "Cloudflare API 凭据未配置，DNS 检测会退回到公开 MX 查询。",
+    healthBaseDomainConfigured: "主域名来自显式配置。",
+    healthBaseDomainFromHost: "主域名由当前自定义访问域名推断。",
+    healthBaseDomainFromZone: "主域名由 Cloudflare Zone API 推断。",
+    healthBaseDomainPlaceholder: "主域名仍是占位值。请设置 BASE_DOMAIN 或配置 Cloudflare API 凭据。",
+    migrationStatusTitle: "迁移状态",
+    migrationStatusBody: "当前 D1 结构与这版代码的兼容情况。",
+    migration0001Title: "0001 基础结构",
+    migration0001Ok: "基础表已存在。",
+    migration0001Missing: "基础表缺失，请先执行 0001_initial.sql。",
+    migration0003Title: "0003 子域名复用",
+    migration0003Ok: "已支持一个子域名下多个邮箱。",
+    migration0003Missing: "仍存在旧的子域名唯一索引，请执行 0003_reuse_subdomains.sql。",
+    migration0004Title: "0004 分组与域名健康状态",
+    migration0004Ok: "邮箱分组和域名验证字段已存在。",
+    migration0004Warning: "0004 核心字段已存在，但有辅助索引缺失。",
+    migration0004Missing: "使用分组或域名验证前，请执行 0004_mailbox_groups_and_domain_health.sql。",
     adminCount: "管理员数量",
     activeSessions: "活跃会话",
     failedLogins24h: "24 小时失败登录",
@@ -1373,6 +1413,26 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         healthSchemaOk: ${JSON.stringify(t(locale, "healthSchemaOk"))},
         healthLegacySubdomainIndex: ${JSON.stringify(t(locale, "healthLegacySubdomainIndex"))},
         healthPlainPasswordWarning: ${JSON.stringify(t(locale, "healthPlainPasswordWarning"))},
+        healthCloudflareAccessEnabled: ${JSON.stringify(t(locale, "healthCloudflareAccessEnabled"))},
+        healthCloudflareAccessDisabled: ${JSON.stringify(t(locale, "healthCloudflareAccessDisabled"))},
+        healthCloudflareApiConfigured: ${JSON.stringify(t(locale, "healthCloudflareApiConfigured"))},
+        healthCloudflareApiMissing: ${JSON.stringify(t(locale, "healthCloudflareApiMissing"))},
+        healthBaseDomainConfigured: ${JSON.stringify(t(locale, "healthBaseDomainConfigured"))},
+        healthBaseDomainFromHost: ${JSON.stringify(t(locale, "healthBaseDomainFromHost"))},
+        healthBaseDomainFromZone: ${JSON.stringify(t(locale, "healthBaseDomainFromZone"))},
+        healthBaseDomainPlaceholder: ${JSON.stringify(t(locale, "healthBaseDomainPlaceholder"))},
+        migrationStatusTitle: ${JSON.stringify(t(locale, "migrationStatusTitle"))},
+        migrationStatusBody: ${JSON.stringify(t(locale, "migrationStatusBody"))},
+        migration0001Title: ${JSON.stringify(t(locale, "migration0001Title"))},
+        migration0001Ok: ${JSON.stringify(t(locale, "migration0001Ok"))},
+        migration0001Missing: ${JSON.stringify(t(locale, "migration0001Missing"))},
+        migration0003Title: ${JSON.stringify(t(locale, "migration0003Title"))},
+        migration0003Ok: ${JSON.stringify(t(locale, "migration0003Ok"))},
+        migration0003Missing: ${JSON.stringify(t(locale, "migration0003Missing"))},
+        migration0004Title: ${JSON.stringify(t(locale, "migration0004Title"))},
+        migration0004Ok: ${JSON.stringify(t(locale, "migration0004Ok"))},
+        migration0004Warning: ${JSON.stringify(t(locale, "migration0004Warning"))},
+        migration0004Missing: ${JSON.stringify(t(locale, "migration0004Missing"))},
         confirmDialogDeleteTitle: ${JSON.stringify(t(locale, "confirmDialogDeleteTitle"))},
         confirmDialogCleanupTitle: ${JSON.stringify(t(locale, "confirmDialogCleanupTitle"))},
         confirmDialogCancel: ${JSON.stringify(t(locale, "confirmDialogCancel"))},
@@ -1449,24 +1509,81 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         '</div>';
       }
 
+      function migrationDetail(item) {
+        if (item.id === "0001") {
+          return {
+            title: text.migration0001Title,
+            detail: item.status === "ok" ? text.migration0001Ok : text.migration0001Missing
+          };
+        }
+        if (item.id === "0003") {
+          return {
+            title: text.migration0003Title,
+            detail: item.status === "ok" ? text.migration0003Ok : text.migration0003Missing
+          };
+        }
+        return {
+          title: text.migration0004Title,
+          detail: item.status === "ok"
+            ? text.migration0004Ok
+            : item.status === "warning"
+              ? text.migration0004Warning
+              : text.migration0004Missing
+        };
+      }
+
+      function baseDomainHealthMessage(source) {
+        if (source === "configured") return text.healthBaseDomainConfigured;
+        if (source === "request_host") return text.healthBaseDomainFromHost;
+        if (source === "cloudflare_zone") return text.healthBaseDomainFromZone;
+        return text.healthBaseDomainPlaceholder;
+      }
+
       function renderSystemHealth(health) {
+        const database = health?.database || {};
+        const migrations = database.migrations || [];
+        const migrationNeedsAction = migrations.some((item) => item.status !== "ok");
+        const needsAction =
+          !database.schemaReady ||
+          migrationNeedsAction ||
+          Boolean(database.legacySubdomainUniqueIndexExists) ||
+          Boolean(health?.plainBootstrapPasswordExposed) ||
+          !health?.config?.baseDomainReady ||
+          !health?.config?.cloudflareApiConfigured ||
+          !health?.config?.cfAccessEnabled;
         const messages = [];
-        const needsAction = Boolean(health?.database?.legacySubdomainUniqueIndexExists) || Boolean(health?.plainBootstrapPasswordExposed);
 
         messages.push(
-          health?.database?.legacySubdomainUniqueIndexExists
+          database.legacySubdomainUniqueIndexExists
             ? text.healthLegacySubdomainIndex
             : text.healthSchemaOk
         );
+        messages.push(baseDomainHealthMessage(health?.config?.baseDomainSource));
+        messages.push(health?.config?.cloudflareApiConfigured ? text.healthCloudflareApiConfigured : text.healthCloudflareApiMissing);
+        messages.push(health?.config?.cfAccessEnabled ? text.healthCloudflareAccessEnabled : text.healthCloudflareAccessDisabled);
         if (health?.plainBootstrapPasswordExposed) {
           messages.push(text.healthPlainPasswordWarning);
         }
+
+        const migrationRows = migrations.map((item) => {
+          const detail = migrationDetail(item);
+          const statusText = item.status === "ok" ? text.systemHealthOk : text.systemHealthNeedsAction;
+          return '<div class="detail-item">' +
+            '<span class="detail-label">' + escapeHtml(detail.title) + '</span>' +
+            '<strong class="detail-value">' + escapeHtml(statusText) + '</strong>' +
+            '<span class="table-preview">' + escapeHtml(detail.detail) + '</span>' +
+          '</div>';
+        }).join("");
 
         healthEl.className = "state-panel state-panel--compact" + (needsAction ? " state-panel--danger" : "");
         healthEl.innerHTML =
           '<p class="state-panel__eyebrow">' + escapeHtml(text.systemHealth) + '</p>' +
           '<p class="state-panel__title">' + escapeHtml(needsAction ? text.systemHealthNeedsAction : text.systemHealthOk) + '</p>' +
-          '<p class="state-panel__body">' + escapeHtml(messages.join(" ")) + '</p>';
+          '<p class="state-panel__body">' + escapeHtml(messages.join(" ")) + '</p>' +
+          '<div class="detail-list health-detail-list">' +
+            renderDetailItem(text.migrationStatusTitle, migrationNeedsAction ? text.systemHealthNeedsAction : text.systemHealthOk, text.migrationStatusBody) +
+            migrationRows +
+          '</div>';
       }
 
       function resolveConfirmDialog(result) {
@@ -1721,15 +1838,15 @@ function renderAdminPage(appName: string, username: string, locale: Locale): str
         )).join("");
 
         policyEl.innerHTML = [
-          [text.configBaseDomain, payload.config.baseDomain],
-          [text.configBootstrapAdmin, payload.config.bootstrapAdminUsername],
-          [text.configCfAccess, payload.config.cfAccessEnabled ? text.featureEnabled : text.featureDisabled],
-          [text.configSessionTtl, payload.config.sessionTtlHours + 'h'],
-          [text.configLoginThreshold, String(payload.config.maxLoginFailures)],
-          [text.configLoginBlock, payload.config.loginBlockMinutes + 'm'],
-          [text.configReceivingStrategy, text.policyRandomSubdomains],
-          [text.configMailboxNaming, text.configMailboxNamingValue]
-        ].map(([label, value]) => renderDetailItem(label, value)).join("");
+          [text.configBaseDomain, payload.config.baseDomain, baseDomainHealthMessage(payload.config.baseDomainSource)],
+          [text.configBootstrapAdmin, payload.config.bootstrapAdminUsername, ""],
+          [text.configCfAccess, payload.config.cfAccessEnabled ? text.featureEnabled : text.featureDisabled, ""],
+          [text.configSessionTtl, payload.config.sessionTtlHours + 'h', ""],
+          [text.configLoginThreshold, String(payload.config.maxLoginFailures), ""],
+          [text.configLoginBlock, payload.config.loginBlockMinutes + 'm', ""],
+          [text.configReceivingStrategy, text.policyRandomSubdomains, ""],
+          [text.configMailboxNaming, text.configMailboxNamingValue, ""]
+        ].map(([label, value, meta]) => renderDetailItem(label, value, meta)).join("");
 
         if (!payload.suspiciousLoginIps || payload.suspiciousLoginIps.length === 0) {
           suspiciousIpRows.innerHTML = "";
@@ -4453,18 +4570,54 @@ function isPlaceholderDomain(value: string): boolean {
   return ["example.com", "yourdomain.com", "localhost", "127.0.0.1"].includes(value.toLowerCase());
 }
 
-function resolveBaseDomain(request: Request, env: Env): string {
+function isCloudflareManagedHostname(hostname: string): boolean {
+  return hostname.endsWith(".workers.dev") || hostname.endsWith(".pages.dev") || hostname.endsWith(".trycloudflare.com");
+}
+
+interface BaseDomainResolution {
+  value: string;
+  source: "configured" | "request_host" | "cloudflare_zone" | "placeholder";
+  configuredValue: string;
+  requestHost: string;
+}
+
+async function resolveBaseDomainInfo(request: Request, env: Env): Promise<BaseDomainResolution> {
   const configured = env.BASE_DOMAIN?.trim().toLowerCase();
-  if (configured && !isPlaceholderDomain(configured)) {
-    return configured;
-  }
-
   const hostname = new URL(request.url).hostname.toLowerCase();
-  if (!hostname.endsWith(".workers.dev") && !isPlaceholderDomain(hostname)) {
-    return hostname;
+  if (configured && !isPlaceholderDomain(configured)) {
+    return {
+      value: configured,
+      source: "configured",
+      configuredValue: configured,
+      requestHost: hostname
+    };
   }
 
-  return configured || "example.com";
+  const zoneName = await fetchCloudflareZoneName(env);
+  if (zoneName && !isPlaceholderDomain(zoneName)) {
+    return {
+      value: zoneName,
+      source: "cloudflare_zone",
+      configuredValue: configured || "",
+      requestHost: hostname
+    };
+  }
+
+  if (!isCloudflareManagedHostname(hostname) && !isPlaceholderDomain(hostname)) {
+    return {
+      value: hostname,
+      source: "request_host",
+      configuredValue: configured || "",
+      requestHost: hostname
+    };
+  }
+
+  return {
+    value: configured || "example.com",
+    source: "placeholder",
+    configuredValue: configured || "",
+    requestHost: hostname
+  };
 }
 
 function normalizeGroupColor(value: unknown): string | null {
@@ -4495,6 +4648,11 @@ interface SubdomainDnsVerificationResult {
 interface CloudflareApiEnvelope<T> {
   success?: boolean;
   result?: T;
+}
+
+interface CloudflareZoneDetails {
+  name?: string;
+  status?: string;
 }
 
 interface CloudflareEmailRoutingSettings {
@@ -4557,6 +4715,16 @@ async function fetchCloudflareApi<T>(env: Env, path: string): Promise<T | null> 
   }
 
   return payload.result;
+}
+
+async function fetchCloudflareZoneName(env: Env): Promise<string | null> {
+  try {
+    const zone = await fetchCloudflareApi<CloudflareZoneDetails>(env, "");
+    const name = zone?.name?.trim().toLowerCase();
+    return name || null;
+  } catch (_error) {
+    return null;
+  }
 }
 
 function isCloudflareRoutingMx(record: string): boolean {
@@ -5079,22 +5247,36 @@ async function handleAdminOverviewApi(request: Request, env: Env): Promise<Respo
     listSuspiciousLoginIps(env.DB, 24, 3, 12),
     getDatabaseHealth(env.DB)
   ]);
+  const baseDomainInfo = await resolveBaseDomainInfo(request, env);
+  const cloudflareApiConfigured = Boolean(env.CLOUDFLARE_API_TOKEN?.trim() && env.CLOUDFLARE_ZONE_ID?.trim());
+  const cfAccessEnabled =
+    getBooleanVar(env.CF_ACCESS_ENABLED, false) ||
+    Boolean(request.headers.get("cf-access-authenticated-user-email") || request.headers.get("cf-access-jwt-assertion"));
 
   return json({
     stats,
     config: {
-      baseDomain: resolveBaseDomain(request, env),
+      baseDomain: baseDomainInfo.value,
+      baseDomainSource: baseDomainInfo.source,
+      baseDomainReady: !isPlaceholderDomain(baseDomainInfo.value),
       configuredBaseDomain: env.BASE_DOMAIN,
       bootstrapAdminUsername: env.BOOTSTRAP_ADMIN_USERNAME,
-      cfAccessEnabled: getBooleanVar(env.CF_ACCESS_ENABLED, false),
-      cloudflareApiConfigured: Boolean(env.CLOUDFLARE_API_TOKEN?.trim() && env.CLOUDFLARE_ZONE_ID?.trim()),
+      cfAccessEnabled,
+      cloudflareApiConfigured,
       sessionTtlHours: getNumberVar(env.SESSION_TTL_HOURS, 24),
       maxLoginFailures: getNumberVar(env.MAX_LOGIN_FAILURES, 10),
       loginBlockMinutes: getNumberVar(env.LOGIN_BLOCK_MINUTES, 15)
     },
     health: {
       database: databaseHealth,
-      plainBootstrapPasswordExposed: hasPlainBootstrapPassword(env) && !isLocalRequest(request)
+      plainBootstrapPasswordExposed: hasPlainBootstrapPassword(env) && !isLocalRequest(request),
+      config: {
+        baseDomain: baseDomainInfo.value,
+        baseDomainSource: baseDomainInfo.source,
+        baseDomainReady: !isPlaceholderDomain(baseDomainInfo.value),
+        cloudflareApiConfigured,
+        cfAccessEnabled
+      }
     },
     admins: admins.map((item) => ({
       id: item.id,
@@ -5490,7 +5672,8 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
     .map((item) => item.trim().toLowerCase())
     .filter(Boolean)
     .filter((item) => isValidSubdomainLabel(item));
-  const baseDomain = resolveBaseDomain(request, env);
+  const baseDomainInfo = await resolveBaseDomainInfo(request, env);
+  const baseDomain = baseDomainInfo.value;
 
   if (customLabels.length > 0) {
     const createdCount = await insertSubdomains(
@@ -5509,7 +5692,7 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
       targetId: null,
       ipAddress: getClientIp(request),
       userAgent: request.headers.get("user-agent"),
-      metadata: { requestedCount: customLabels.length, createdCount, baseDomain }
+      metadata: { requestedCount: customLabels.length, createdCount, baseDomain, baseDomainSource: baseDomainInfo.source }
     });
 
     return json({ createdCount });
@@ -5542,7 +5725,7 @@ async function handleGenerateSubdomains(request: Request, env: Env): Promise<Res
     targetId: null,
     ipAddress: getClientIp(request),
     userAgent: request.headers.get("user-agent"),
-    metadata: { requestedCount: count, labelLength, createdCount, baseDomain }
+    metadata: { requestedCount: count, labelLength, createdCount, baseDomain, baseDomainSource: baseDomainInfo.source }
   });
 
   return json({ createdCount });

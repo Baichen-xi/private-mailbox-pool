@@ -363,11 +363,13 @@ export const APP_STYLES = String.raw`
         color: #8a661f;
       }
       .notice--floating {
-        position: fixed;
-        top: 18px;
-        right: 18px;
-        z-index: 80;
+        position: fixed !important;
+        top: max(12px, env(safe-area-inset-top));
+        right: max(12px, env(safe-area-inset-right));
+        z-index: 9999;
         width: min(420px, calc(100vw - 28px));
+        max-height: calc(100dvh - 24px);
+        overflow: auto;
         box-shadow: 0 18px 44px rgba(27, 33, 35, 0.16);
       }
       .muted {

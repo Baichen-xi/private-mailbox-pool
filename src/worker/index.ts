@@ -2544,6 +2544,7 @@ function renderMailboxesPage(appName: string, locale: Locale): string {
       };
 
       const pageMessage = document.getElementById("page-message");
+      document.body.appendChild(pageMessage);
       const confirmBackdrop = document.getElementById("confirm-backdrop");
       const confirmDialogEyebrow = document.getElementById("confirm-dialog-eyebrow");
       const confirmDialogTitle = document.getElementById("confirm-dialog-title");

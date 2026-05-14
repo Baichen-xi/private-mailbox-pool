@@ -228,6 +228,8 @@ const translations = {
     totalEmails: "Total emails",
     lastReceivedAt: "Last received",
     mailboxReady: "This mailbox is active and ready to receive mail.",
+    mailboxAutoRefreshNewMail: "New mail arrived. The list has been refreshed.",
+    mailboxAutoRefreshUpdated: "Mailbox activity changed. The list has been refreshed.",
     noRecentEmail: "No recent email yet",
     storedEmailsHint: "Stored messages for this mailbox are listed below.",
     retentionPolicy: "Retention",
@@ -632,6 +634,8 @@ const translations = {
     totalEmails: "邮件总数",
     lastReceivedAt: "最后收信",
     mailboxReady: "这个邮箱已启用，可以继续接收邮件。",
+    mailboxAutoRefreshNewMail: "收到新邮件，列表已自动刷新。",
+    mailboxAutoRefreshUpdated: "邮箱状态有变化，列表已自动刷新。",
     noRecentEmail: "暂时还没有最近邮件",
     storedEmailsHint: "下方列出这个邮箱已经保存的邮件。",
     retentionPolicy: "保留策略",
@@ -3949,6 +3953,8 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         unreadEmails: ${JSON.stringify(t(locale, "unreadEmails"))},
         lastReceivedAt: ${JSON.stringify(t(locale, "lastReceivedAt"))},
         mailboxReady: ${JSON.stringify(t(locale, "mailboxReady"))},
+        mailboxAutoRefreshNewMail: ${JSON.stringify(t(locale, "mailboxAutoRefreshNewMail"))},
+        mailboxAutoRefreshUpdated: ${JSON.stringify(t(locale, "mailboxAutoRefreshUpdated"))},
         noRecentEmail: ${JSON.stringify(t(locale, "noRecentEmail"))},
         emailListHint: ${JSON.stringify(t(locale, "emailListHint"))},
         retentionPolicy: ${JSON.stringify(t(locale, "retentionPolicy"))},
@@ -4013,6 +4019,9 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
       let currentMailboxNote = "";
       let selectedEmailIds = new Set();
       let pendingConfirmResolver = null;
+      let latestMailboxSnapshot = null;
+      let isPollingMailbox = false;
+      let pollTimer = null;
 
       function showMessage(kind, value) {
         const palette = kind === "success"
@@ -4084,6 +4093,29 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
 
       function formatSelectedCount(count) {
         return text.selectedCount.replace("{count}", String(count));
+      }
+
+      function isPageVisible() {
+        return document.visibilityState === "visible" && !document.hidden;
+      }
+
+      function getMailboxSnapshot(mailbox) {
+        return {
+          lastReceivedAt: mailbox.lastReceivedAt || "",
+          totalEmailCount: Number(mailbox.totalEmailCount || 0),
+          unreadEmailCount: Number(mailbox.unreadEmailCount || 0),
+          status: mailbox.status || ""
+        };
+      }
+
+      function didMailboxSnapshotChange(left, right) {
+        if (!left || !right) {
+          return true;
+        }
+        return left.lastReceivedAt !== right.lastReceivedAt ||
+          left.totalEmailCount !== right.totalEmailCount ||
+          left.unreadEmailCount !== right.unreadEmailCount ||
+          left.status !== right.status;
       }
 
       function resolveConfirmDialog(result) {
@@ -4391,22 +4423,17 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
       emailFilterSelect.addEventListener("change", renderInboxRows);
       emailSortSelect.addEventListener("change", renderInboxRows);
 
-      async function loadMailboxDetail() {
-        const [mailboxResponse, emailsResponse] = await Promise.all([
-          fetch("/api/mailboxes/" + encodeURIComponent(mailboxId) + "?lang=" + encodeURIComponent(currentLang), {
-            headers: { "x-app-language": currentLang }
-          }),
-          fetch("/api/mailboxes/" + encodeURIComponent(mailboxId) + "/emails?lang=" + encodeURIComponent(currentLang), {
-            headers: { "x-app-language": currentLang }
-          })
-        ]);
+      async function fetchMailboxDetail() {
+        const response = await fetch("/api/mailboxes/" + encodeURIComponent(mailboxId) + "?lang=" + encodeURIComponent(currentLang), {
+          headers: { "x-app-language": currentLang }
+        });
 
-        if (mailboxResponse.status === 401 || emailsResponse.status === 401) {
+        if (response.status === 401) {
           window.location.href = "/login?lang=" + encodeURIComponent(currentLang);
-          return;
+          return null;
         }
 
-        if (mailboxResponse.status === 404) {
+        if (response.status === 404) {
           addressEl.textContent = text.mailboxNotFound;
           showMessage("error", text.mailboxNotFound);
           setMailboxState(text.mailboxNotFound, text.mailboxUnavailableBody, "danger", text.mailboxInfo);
@@ -4425,22 +4452,38 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
           inboxEmpty.hidden = false;
           inboxEmpty.innerHTML = renderStatePanel(text.mailboxNotFound, text.mailboxUnavailableBody, "danger");
           updateSelectionUi([]);
-          return;
+          return null;
         }
 
-        const mailboxPayload = await mailboxResponse.json();
-        if (!mailboxResponse.ok) {
-          showMessage("error", mailboxPayload.error?.message ?? text.unexpectedError);
-          return;
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return null;
         }
 
-        const emailsPayload = await emailsResponse.json();
-        if (!emailsResponse.ok) {
-          showMessage("error", emailsPayload.error?.message ?? text.unexpectedError);
-          return;
+        return payload.mailbox;
+      }
+
+      async function fetchMailboxEmails() {
+        const response = await fetch("/api/mailboxes/" + encodeURIComponent(mailboxId) + "/emails?lang=" + encodeURIComponent(currentLang), {
+          headers: { "x-app-language": currentLang }
+        });
+
+        if (response.status === 401) {
+          window.location.href = "/login?lang=" + encodeURIComponent(currentLang);
+          return null;
         }
 
-        const mailbox = mailboxPayload.mailbox;
+        const payload = await response.json();
+        if (!response.ok) {
+          showMessage("error", payload.error?.message ?? text.unexpectedError);
+          return null;
+        }
+
+        return Array.isArray(payload.items) ? payload.items : [];
+      }
+
+      function renderMailboxSummary(mailbox) {
         clearMailboxState();
         addressEl.textContent = mailbox.fullAddress;
         currentMailboxNote = mailbox.note || "";
@@ -4483,14 +4526,85 @@ function renderMailboxDetailPage(appName: string, locale: Locale, mailboxId: str
         )).join("");
 
         emailListLead.textContent = text.emailListHint;
-        mailboxEmails = Array.isArray(emailsPayload.items) ? emailsPayload.items : [];
+        latestMailboxSnapshot = getMailboxSnapshot(mailbox);
+      }
+
+      async function loadMailboxEmails() {
+        const emails = await fetchMailboxEmails();
+        if (!emails) {
+          return false;
+        }
+        mailboxEmails = emails;
+        selectedEmailIds = new Set(
+          mailboxEmails.filter((email) => selectedEmailIds.has(email.id)).map((email) => email.id)
+        );
+        renderInboxRows();
+        return true;
+      }
+
+      async function loadMailboxDetail() {
+        const [mailbox, emails] = await Promise.all([
+          fetchMailboxDetail(),
+          fetchMailboxEmails()
+        ]);
+
+        if (!mailbox || !emails) {
+          return;
+        }
+
+        renderMailboxSummary(mailbox);
+        mailboxEmails = emails;
         selectedEmailIds = new Set(
           mailboxEmails.filter((email) => selectedEmailIds.has(email.id)).map((email) => email.id)
         );
         renderInboxRows();
       }
 
+      async function pollMailboxStatus() {
+        if (!isPageVisible() || isPollingMailbox) {
+          return;
+        }
+        isPollingMailbox = true;
+        try {
+          const previousSnapshot = latestMailboxSnapshot;
+          const mailbox = await fetchMailboxDetail();
+          if (!mailbox) {
+            return;
+          }
+
+          const nextSnapshot = getMailboxSnapshot(mailbox);
+          const hasChanged = didMailboxSnapshotChange(previousSnapshot, nextSnapshot);
+          renderMailboxSummary(mailbox);
+
+          if (!previousSnapshot || !hasChanged) {
+            return;
+          }
+
+          const refreshed = await loadMailboxEmails();
+          if (!refreshed) {
+            return;
+          }
+
+          const hasNewMail = nextSnapshot.totalEmailCount > previousSnapshot.totalEmailCount ||
+            nextSnapshot.lastReceivedAt !== previousSnapshot.lastReceivedAt;
+          showMessage("reminder", hasNewMail ? text.mailboxAutoRefreshNewMail : text.mailboxAutoRefreshUpdated);
+        } finally {
+          isPollingMailbox = false;
+        }
+      }
+
       loadMailboxDetail();
+      pollTimer = window.setInterval(pollMailboxStatus, 10000);
+      document.addEventListener("visibilitychange", () => {
+        if (isPageVisible()) {
+          pollMailboxStatus();
+        }
+      });
+      window.addEventListener("pagehide", () => {
+        if (pollTimer) {
+          window.clearInterval(pollTimer);
+        }
+      });
     </script>`,
     locale
   );
